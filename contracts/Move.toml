@@ -1,0 +1,6 @@
+[package]
+name = "serverfarmchain"
+edition = "2024"
+
+[addresses]
+serverfarmchain = "0x0"

@@ -1,0 +1,49 @@
+{
+  "sites": [
+    {
+      "id": "SITE-001",
+      "name": "North Grid Campus",
+      "siteType": "Land",
+      "areaM2": 24000,
+      "targetKw": 1200,
+      "approxLocation": "Nord Italia - Lombardia",
+      "owner": "0x8f9a3a8a",
+      "computeReady": true,
+      "status": "seed",
+      "tags": ["Cooling-ready", "PV-ready"],
+      "iotaSiteObjectId": "0x81f5c3886411f5cd7e309df7c047f643a104e0fc13373400b4b18885036d7633"
+    },
+    {
+      "id": "SITE-002",
+      "name": "Edge Warehouse 17",
+      "siteType": "Warehouse",
+      "areaM2": 12000,
+      "targetKw": 800,
+      "approxLocation": "Nord Italia - Piemonte",
+      "owner": "0x2ca99103",
+      "computeReady": true,
+      "status": "seed",
+      "tags": ["Grid-near", "Fiber-near"],
+      "iotaSiteObjectId": "0xf8f6a61dab4a53fe9474378bb941d84428c45d5b9cba0155223030403aadfff0"
+    },
+    {
+      "id": "SITE-003",
+      "name": "Solar Compute Plot",
+      "siteType": "Land",
+      "areaM2": 30000,
+      "targetKw": 1800,
+      "approxLocation": "Sud Italia - Puglia",
+      "owner": "0x4b01d820",
+      "computeReady": true,
+      "status": "seed",
+      "tags": ["PV-ready", "Expansion-ready"],
+      "iotaSiteObjectId": "0x2369c3deef0c75b6a50b6a5ce214d8c2492915c77d3f1bb0d95a96220459a712"
+    }
+  ],
+  "pools": [],
+  "proofs": [],
+  "contributions": [],
+  "walletBalances": {},
+  "computeOffers": [],
+  "rentals": []
+}

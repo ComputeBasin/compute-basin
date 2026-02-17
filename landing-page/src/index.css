@@ -1,0 +1,36 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Space Grotesk", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "Consolas", monospace;
+}
+
+@layer base {
+  * {
+    @apply border-slate-200;
+  }
+
+  body {
+    @apply min-h-screen bg-slate-950 text-slate-100 antialiased;
+    background-image:
+      radial-gradient(circle at 10% 0%, rgba(34, 211, 238, 0.16), transparent 36%),
+      radial-gradient(circle at 85% 20%, rgba(16, 185, 129, 0.12), transparent 38%),
+      linear-gradient(180deg, #020617 0%, #020617 35%, #0f172a 100%);
+  }
+
+  a {
+    @apply transition-colors;
+  }
+
+  input,
+  button {
+    @apply outline-none;
+  }
+}
+
+@layer utilities {
+  .surface {
+    @apply rounded-2xl border border-white/10 bg-slate-900/70 shadow-[0_20px_60px_-28px_rgba(45,212,191,0.35)] backdrop-blur-md;
+  }
+}
