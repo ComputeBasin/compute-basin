@@ -35,6 +35,7 @@ function makeStore() {
     proofs: [],
     contributions: [],
     walletBalances: {},
+    walletLockedBalances: {},
     computeOffers: [],
     rentals: [],
     properties: [],
@@ -137,6 +138,11 @@ test("health, meta and auth roles expose expected contract", async () => {
     const meta = await request(server.baseUrl, "/api/meta");
     assert.equal(meta.status, 200);
     assert.equal(meta.payload.adminWallet, ADMIN_WALLET);
+    assert.equal(meta.payload.onChainContributionRequired, false);
+    assert.equal(meta.payload.contributionPriceNanoIota, "1000000");
+    assert.equal(meta.payload.contributionRecipientWallet, ADMIN_WALLET);
+    assert.equal(meta.payload.iotaPerToken, "0.001");
+    assert.equal(meta.payload.tokensPerIota, "1000");
 
     const roles = await request(server.baseUrl, "/api/auth/roles", {
       wallet: SRL_WALLET,
@@ -283,6 +289,7 @@ test("Legacy flow: fundraising -> acquisition doc -> compute offer -> rent", asy
     );
     assert.equal(contributeRes.status, 201);
     assert.equal(contributeRes.payload.walletBalance, 50);
+    assert.equal(contributeRes.payload.lockedWalletBalance, 0);
     assert.equal(contributeRes.payload.pool.status, "funded");
 
     const acquisitionRes = await request(
@@ -344,11 +351,74 @@ test("Legacy flow: fundraising -> acquisition doc -> compute offer -> rent", asy
     assert.equal(walletSummary.payload.contributions.length, 1);
     assert.equal(walletSummary.payload.rentals.length, 1);
     assert.equal(walletSummary.payload.tokenBalance, 40);
+    assert.equal(walletSummary.payload.lockedTokenBalance, 0);
 
     const offers = await request(server.baseUrl, "/api/compute/offers");
     assert.equal(offers.status, 200);
     assert.equal(offers.payload.offers.length, 1);
     assert.equal(offers.payload.offers[0].availableUnits, 8);
+  } finally {
+    await server.close();
+  }
+});
+
+test("Legacy flow: failed pool allows contributor refund after deadline", async () => {
+  const server = await startServer(makeStore());
+  try {
+    const createPoolRes = await request(server.baseUrl, "/api/admin/pools", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: {
+        siteId: "SITE-001",
+        title: "Refundable Pool",
+        description: "Deadline-based fundraising",
+        location: "Lombardia",
+        landValueTokens: 100,
+        surplusTokens: 0,
+        fundingDeadlineMs: Date.now() + 150,
+        documents: [
+          {
+            name: "Land deed",
+            docType: "title_deed",
+            driveUrl: "https://example.com/deed",
+          },
+        ],
+      },
+    });
+    assert.equal(createPoolRes.status, 201);
+    const poolId = createPoolRes.payload.pool.id;
+
+    const contributeRes = await request(server.baseUrl, `/api/pools/${poolId}/contribute`, {
+      method: "POST",
+      wallet: INVESTOR_WALLET,
+      body: { tokenAmount: 20 },
+    });
+    assert.equal(contributeRes.status, 201);
+    assert.equal(contributeRes.payload.walletBalance, 0);
+    assert.equal(contributeRes.payload.lockedWalletBalance, 20);
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const refundRes = await request(server.baseUrl, `/api/pools/${poolId}/refund`, {
+      method: "POST",
+      wallet: INVESTOR_WALLET,
+      body: {},
+    });
+    assert.equal(refundRes.status, 201);
+    assert.equal(refundRes.payload.pool.status, "failed");
+    assert.equal(refundRes.payload.refundedTokenAmount, 20);
+    assert.equal(refundRes.payload.walletBalance, 0);
+    assert.equal(refundRes.payload.lockedWalletBalance, 0);
+
+    const walletSummary = await request(
+      server.baseUrl,
+      `/api/wallets/${INVESTOR_WALLET}/summary`
+    );
+    assert.equal(walletSummary.status, 200);
+    assert.equal(walletSummary.payload.tokenBalance, 0);
+    assert.equal(walletSummary.payload.lockedTokenBalance, 0);
+    assert.equal(walletSummary.payload.contributions.length, 1);
+    assert.ok(walletSummary.payload.contributions[0].refundedAtMs);
   } finally {
     await server.close();
   }

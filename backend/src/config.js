@@ -15,6 +15,18 @@ export const IOTA_SIGNER_SECRET_KEY = process.env.IOTA_SIGNER_SECRET_KEY || "";
 const rawGasBudget = process.env.IOTA_GAS_BUDGET || "100000000";
 export const IOTA_GAS_BUDGET = BigInt(rawGasBudget);
 
+export const REQUIRE_ONCHAIN_CONTRIBUTION =
+  (process.env.REQUIRE_ONCHAIN_CONTRIBUTION || "false").toLowerCase() ===
+  "true";
+const rawContributionPriceNanos =
+  process.env.CONTRIBUTION_PRICE_NANOS || "1000000";
+export const CONTRIBUTION_PRICE_NANOS = BigInt(rawContributionPriceNanos);
+export const CONTRIBUTION_RECIPIENT_WALLET = (
+  process.env.CONTRIBUTION_RECIPIENT_WALLET ||
+  ADMIN_WALLET ||
+  ""
+).toLowerCase();
+
 export const ROOT_DIR = process.cwd();
 
 export function getStorePath() {

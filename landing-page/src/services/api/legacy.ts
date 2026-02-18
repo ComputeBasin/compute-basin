@@ -45,6 +45,7 @@ export async function createPool(input: {
   location: string;
   landValueTokens: number;
   surplusTokens: number;
+  fundingDurationDays?: number;
   documents: Array<{
     name: string;
     docType: string;
@@ -65,18 +66,53 @@ export async function contributeToPool(input: {
   walletAddress: string;
   poolId: string;
   tokenAmount: number;
+  paymentTxDigest?: string;
 }) {
+  const poolId = input.poolId?.trim();
+  if (!poolId) {
+    throw new Error("poolId is required");
+  }
+
   return fetchJson<{
     contribution: Contribution;
     pool: Pool;
     walletBalance: number;
+    lockedWalletBalance: number;
   }>(
-    `/pools/${input.poolId}/contribute`,
+    `/pools/${poolId}/contribute`,
     withWallet(input.walletAddress, {
       method: "POST",
       body: JSON.stringify({
         walletAddress: input.walletAddress,
         tokenAmount: input.tokenAmount,
+        paymentTxDigest: input.paymentTxDigest,
+      }),
+    })
+  );
+}
+
+export async function refundPoolContribution(input: {
+  walletAddress: string;
+  poolId: string;
+}) {
+  const poolId = input.poolId?.trim();
+  if (!poolId) {
+    throw new Error("poolId is required");
+  }
+
+  return fetchJson<{
+    pool: Pool;
+    refundedTokenAmount: number;
+    refundedNanoIota: string | null;
+    refundTxDigest: string | null;
+    walletBalance: number;
+    lockedWalletBalance: number;
+  }>(
+    `/pools/${poolId}/refund`,
+    withWallet(input.walletAddress, {
+      method: "POST",
+      body: JSON.stringify({
+        walletAddress: input.walletAddress,
       }),
     })
   );
@@ -89,11 +125,19 @@ export async function addAcquisitionDoc(input: {
   driveUrl: string;
   docHashSha256?: string;
 }) {
+  const poolId = input.poolId?.trim();
+  if (!poolId) {
+    throw new Error("poolId is required");
+  }
+
   return fetchJson<{ pool: Pool; proof: Proof }>(
-    `/admin/pools/${input.poolId}/acquisition-doc`,
+    `/admin/pools/${poolId}/acquisition-doc`,
     withWallet(input.walletAddress, {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        ...input,
+        poolId,
+      }),
     })
   );
 }
@@ -117,11 +161,19 @@ export async function upsertComputeOffer(input: {
     driveUrl: string;
   }>;
 }) {
+  const poolId = input.poolId?.trim();
+  if (!poolId) {
+    throw new Error("poolId is required");
+  }
+
   return fetchJson<{ pool: Pool; computeOffer: ComputeOffer }>(
-    `/admin/pools/${input.poolId}/compute-offer`,
+    `/admin/pools/${poolId}/compute-offer`,
     withWallet(input.walletAddress, {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        ...input,
+        poolId,
+      }),
     })
   );
 }

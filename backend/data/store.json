@@ -10,7 +10,10 @@
       "owner": "0x8f9a3a8a",
       "computeReady": true,
       "status": "seed",
-      "tags": ["Cooling-ready", "PV-ready"],
+      "tags": [
+        "Cooling-ready",
+        "PV-ready"
+      ],
       "iotaSiteObjectId": "0x81f5c3886411f5cd7e309df7c047f643a104e0fc13373400b4b18885036d7633"
     },
     {
@@ -23,7 +26,10 @@
       "owner": "0x2ca99103",
       "computeReady": true,
       "status": "seed",
-      "tags": ["Grid-near", "Fiber-near"],
+      "tags": [
+        "Grid-near",
+        "Fiber-near"
+      ],
       "iotaSiteObjectId": "0xf8f6a61dab4a53fe9474378bb941d84428c45d5b9cba0155223030403aadfff0"
     },
     {
@@ -36,14 +42,110 @@
       "owner": "0x4b01d820",
       "computeReady": true,
       "status": "seed",
-      "tags": ["PV-ready", "Expansion-ready"],
+      "tags": [
+        "PV-ready",
+        "Expansion-ready"
+      ],
       "iotaSiteObjectId": "0x2369c3deef0c75b6a50b6a5ce214d8c2492915c77d3f1bb0d95a96220459a712"
     }
   ],
-  "pools": [],
-  "proofs": [],
-  "contributions": [],
-  "walletBalances": {},
+  "pools": [
+    {
+      "id": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "siteId": "SITE-001",
+      "title": "Casa Server Silvio",
+      "description": "Very big house for very big boys",
+      "location": "North Italy",
+      "status": "open",
+      "createdAtMs": 1771420021646,
+      "landValueTokens": 100000,
+      "surplusTokens": 50000,
+      "hardCapTokens": 150000,
+      "raisedTokens": 3040,
+      "tokenSymbol": "SFC",
+      "acquisitionProofId": null,
+      "computeOfferId": null
+    }
+  ],
+  "proofs": [
+    {
+      "id": "proof_7d1ebbb5-3b4f-466c-812c-caf766857e3f",
+      "poolId": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "siteId": "SITE-001",
+      "name": "Planimetria casa",
+      "docType": "planimetria ",
+      "driveUrl": "https://docs.google.com/document/d/1cCZVZfWe4LjWkOsJZ7vWDkzmUmvi8T4v/edit?usp=drive_link&ouid=108727141903160578711&rtpof=true&sd=true",
+      "docHashSha256": "5018e561e13f100f86d47dcf8f866b423c0db9be34035e7632468445e94781c9",
+      "issuer": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "timestampMs": 1771420021647,
+      "iotaObjectId": "0x4f661bd5c9244fe99d68afa5eaee0072",
+      "iotaTxDigest": "0x7fd6632f77af4a98a7f5e81c7d60e4cb",
+      "chainMode": "mock"
+    }
+  ],
+  "contributions": [
+    {
+      "id": "contrib_e91b722b-490c-495e-ac94-40d32d184285",
+      "poolId": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "walletAddress": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "tokenAmount": 1000,
+      "timestampMs": 1771432062958
+    },
+    {
+      "id": "contrib_2bf2dbf5-6205-4699-9c89-13685a402033",
+      "poolId": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "walletAddress": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "tokenAmount": 2000,
+      "paymentMode": "offchain",
+      "timestampMs": 1771433672380
+    },
+    {
+      "id": "contrib_1897cb6b-169b-4f88-9247-ae67a1eefd9d",
+      "poolId": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "walletAddress": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "tokenAmount": 10,
+      "paymentMode": "offchain",
+      "timestampMs": 1771433747951
+    },
+    {
+      "id": "contrib_3067caee-0c96-4dea-a32c-49ce035ea0b8",
+      "poolId": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "walletAddress": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "tokenAmount": 10,
+      "paymentMode": "offchain",
+      "timestampMs": 1771433783428
+    },
+    {
+      "id": "contrib_ad6760a1-1095-4102-bc14-8a8582ca264e",
+      "poolId": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "walletAddress": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "tokenAmount": 20,
+      "paymentMode": "onchain",
+      "tokenSettlementMode": "locked",
+      "timestampMs": 1771437182269,
+      "transactionHash": "UDP7sr6h9KAYAU7iNJ4ggbyJBNTaLGnzC3pyJmB8YCu",
+      "paymentTxDigest": "UDP7sr6h9KAYAU7iNJ4ggbyJBNTaLGnzC3pyJmB8YCu",
+      "paymentCoinType": "0x2::iota::IOTA",
+      "paymentAmountNanoIota": "20000000",
+      "expectedPaymentAmountNanoIota": "20000000",
+      "paymentRecipientWallet": "0x1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "walletBalances": {
+    "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2": 3020
+  },
+  "walletLockedBalances": {
+    "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2": 20
+  },
   "computeOffers": [],
-  "rentals": []
+  "rentals": [],
+  "properties": [],
+  "hardwareSpecs": [],
+  "userRoles": [],
+  "assetTokens": [],
+  "tokenAllocations": [],
+  "userProfiles": [],
+  "rbacPools": [],
+  "rbacComputeOffers": [],
+  "rbacRentals": []
 }

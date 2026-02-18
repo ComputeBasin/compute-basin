@@ -15,6 +15,7 @@ Backend per ComputeBasin con due namespace API distinti:
 - `GET /api/pools/:poolId`
 - `POST /api/admin/pools`
 - `POST /api/pools/:poolId/contribute`
+- `POST /api/pools/:poolId/refund`
 - `POST /api/admin/pools/:poolId/acquisition-doc`
 - `POST /api/admin/pools/:poolId/compute-offer`
 - `GET /api/compute/offers`
@@ -52,6 +53,19 @@ Puoi passarlo in header `x-wallet-address` o body `walletAddress`.
 
 - `MOCK_IOTA=true`: notarization mock
 - `MOCK_IOTA=false`: notarization reale IOTA testnet con signer backend
+
+## Modalità contributi pool (legacy)
+
+- `REQUIRE_ONCHAIN_CONTRIBUTION=false` (default): modalità demo, nessun pagamento on-chain richiesto.
+- `REQUIRE_ONCHAIN_CONTRIBUTION=true`: `POST /api/pools/:poolId/contribute` richiede `paymentTxDigest`.
+- Il contributore non puo' coincidere con `CONTRIBUTION_RECIPIENT_WALLET` (treasury): deve essere un wallet separato.
+- Il backend verifica su RPC IOTA:
+  - tx eseguita con successo
+  - sender = wallet contributor
+  - accredito `Coin<IOTA>` verso `CONTRIBUTION_RECIPIENT_WALLET` (o `ADMIN_WALLET`) >= `tokenAmount * CONTRIBUTION_PRICE_NANOS`
+- I token contributo vengono prima bloccati su ledger interno (`walletLockedBalances`) e diventano spendibili solo quando il pool arriva a `funded`.
+- Se la deadline funding scade e il pool non raggiunge l'hard cap, lo stato diventa `failed` e i contributor possono usare `POST /api/pools/:poolId/refund`.
+- In on-chain mode il rimborso invia una tx IOTA dal backend signer (`IOTA_SIGNER_SECRET_KEY`): il signer deve avere fondi sufficienti.
 
 ## Test automatici
 

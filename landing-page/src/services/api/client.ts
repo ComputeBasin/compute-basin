@@ -3,10 +3,41 @@ export const API_BASE =
 
 export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, init);
-  const payload = await response.json();
+  const contentType = response.headers.get("content-type") || "";
+  let payload: unknown = null;
+
+  if (contentType.includes("application/json")) {
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+  } else {
+    const rawText = await response.text();
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      payload = rawText || null;
+    }
+  }
 
   if (!response.ok) {
-    throw new Error(payload.error || `HTTP ${response.status}`);
+    const payloadObj =
+      payload && typeof payload === "object" ? (payload as { error?: unknown; message?: unknown }) : null;
+    const backendMessage =
+      typeof payloadObj?.error === "string"
+        ? payloadObj.error
+        : typeof payloadObj?.message === "string"
+          ? payloadObj.message
+          : typeof payload === "string"
+            ? payload
+            : "";
+
+    const message =
+      backendMessage.trim().length > 0
+        ? `${backendMessage} (HTTP ${response.status})`
+        : `HTTP ${response.status} ${response.statusText}`;
+    throw new Error(message);
   }
 
   return payload as T;

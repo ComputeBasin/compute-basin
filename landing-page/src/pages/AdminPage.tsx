@@ -36,6 +36,7 @@ export function AdminPage() {
     location: "",
     landValueTokens: 0,
     surplusTokens: 0,
+    fundingDurationDays: 30,
   });
   const [docs, setDocs] = useState([emptyDoc()]);
 
@@ -77,6 +78,31 @@ export function AdminPage() {
     load();
   }, []);
 
+  useEffect(() => {
+    if (pools.length === 0) {
+      return;
+    }
+
+    const firstPoolId = pools[0]?.id || "";
+    if (!firstPoolId) {
+      return;
+    }
+
+    setAcquisitionForm((prev) => {
+      if (prev.poolId) {
+        return prev;
+      }
+      return { ...prev, poolId: firstPoolId };
+    });
+
+    setComputeForm((prev) => {
+      if (prev.poolId) {
+        return prev;
+      }
+      return { ...prev, poolId: firstPoolId };
+    });
+  }, [pools]);
+
   async function handleCreatePool() {
     if (!isAdmin) {
       setError("Only the admin wallet can create pools");
@@ -85,6 +111,15 @@ export function AdminPage() {
 
     try {
       setError(null);
+      if (!poolForm.siteId || !poolForm.title || !poolForm.location) {
+        setError("Site, title and location are required");
+        return;
+      }
+      if (poolForm.fundingDurationDays <= 0) {
+        setError("Funding duration must be at least 1 day");
+        return;
+      }
+
       await createPool({
         walletAddress: wallet,
         ...poolForm,
@@ -106,6 +141,7 @@ export function AdminPage() {
         location: "",
         landValueTokens: 0,
         surplusTokens: 0,
+        fundingDurationDays: 30,
       });
       setDocs([emptyDoc()]);
       await load();
@@ -122,6 +158,14 @@ export function AdminPage() {
 
     try {
       setError(null);
+      if (!acquisitionForm.poolId) {
+        setError("Select a target pool before notarizing acquisition deed");
+        return;
+      }
+      if (!acquisitionForm.name || !acquisitionForm.driveUrl) {
+        setError("Acquisition name and drive URL are required");
+        return;
+      }
       await addAcquisitionDoc({
         walletAddress: wallet,
         ...acquisitionForm,
@@ -142,6 +186,10 @@ export function AdminPage() {
 
     try {
       setError(null);
+      if (!computeForm.poolId) {
+        setError("Select a target pool before enabling compute offer");
+        return;
+      }
       const parsedDocs = computeForm.docsText
         .split("\n")
         .map((line) => line.trim())
@@ -281,6 +329,19 @@ export function AdminPage() {
                   onChange={(e) => setPoolForm((p) => ({ ...p, surplusTokens: Number(e.target.value) }))}
                 />
               </label>
+
+              <label className="text-sm text-slate-200">
+                Funding duration (days)
+                <input
+                  type="number"
+                  min={1}
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  value={poolForm.fundingDurationDays || ""}
+                  onChange={(e) =>
+                    setPoolForm((p) => ({ ...p, fundingDurationDays: Number(e.target.value) || 0 }))
+                  }
+                />
+              </label>
             </div>
 
             <p className="text-xs text-slate-400">
@@ -362,7 +423,11 @@ export function AdminPage() {
               <select
                 className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
                 value={acquisitionForm.poolId}
-                onChange={(e) => setAcquisitionForm((p) => ({ ...p, poolId: e.target.value }))}
+                onChange={(e) => {
+                  const selectedPoolId = e.target.value;
+                  setAcquisitionForm((p) => ({ ...p, poolId: selectedPoolId }));
+                  setComputeForm((p) => ({ ...p, poolId: selectedPoolId || p.poolId }));
+                }}
               >
                 <option value="">Select pool</option>
                 {pools.map((pool) => (
@@ -393,6 +458,7 @@ export function AdminPage() {
             <button
               className="rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100"
               onClick={handleAcquisitionDoc}
+              disabled={!acquisitionForm.poolId}
             >
               Notarize acquisition deed
             </button>
@@ -516,6 +582,7 @@ export function AdminPage() {
             <button
               className="rounded-lg bg-gradient-to-r from-cyan-300 to-emerald-300 px-4 py-2 text-sm font-semibold text-slate-900"
               onClick={handleComputeOffer}
+              disabled={!computeForm.poolId}
             >
               Enable or update compute offer
             </button>

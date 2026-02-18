@@ -42,3 +42,4 @@ GitHub Actions workflows:
 ## Analysis Docs
 
 - Workflow and market gap analysis: `docs/workflow_gap_analysis.md`
+- Hackathon eligibility notes: `docs/hackathon_eligibility.md`

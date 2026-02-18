@@ -1,6 +1,14 @@
 import express from "express";
 import cors from "cors";
-import { ADMIN_WALLET, CORS_ORIGIN, MOCK_IOTA } from "./config.js";
+import { NANOS_PER_IOTA } from "@iota/iota-sdk/utils";
+import {
+  ADMIN_WALLET,
+  CORS_ORIGIN,
+  MOCK_IOTA,
+  REQUIRE_ONCHAIN_CONTRIBUTION,
+  CONTRIBUTION_PRICE_NANOS,
+  CONTRIBUTION_RECIPIENT_WALLET,
+} from "./config.js";
 import { readStore } from "./db.js";
 import { getBackendSignerAddress } from "./iotaClient.js";
 import { extractWallet, getUserRoles } from "./roles.js";
@@ -10,6 +18,23 @@ import hardwareRouter from "./routes/hardware.js";
 import tokensRouter from "./routes/tokens.js";
 import poolsRouter from "./routes/pools.js";
 import computeRouter from "./routes/compute.js";
+
+function formatRatio(numerator, denominator, maxDecimals = 6) {
+  if (denominator <= 0n) {
+    return null;
+  }
+
+  const whole = numerator / denominator;
+  const remainder = numerator % denominator;
+  if (remainder === 0n || maxDecimals <= 0) {
+    return whole.toString();
+  }
+
+  const scale = 10n ** BigInt(maxDecimals);
+  const fractional = ((remainder * scale) / denominator).toString().padStart(maxDecimals, "0");
+  const trimmed = fractional.replace(/0+$/, "");
+  return trimmed.length > 0 ? `${whole.toString()}.${trimmed}` : whole.toString();
+}
 
 export function createApp() {
   const app = express();
@@ -41,8 +66,16 @@ export function createApp() {
   });
 
   app.get("/api/meta", (_req, res) => {
+    const iotaPerToken = formatRatio(CONTRIBUTION_PRICE_NANOS, NANOS_PER_IOTA, 9);
+    const tokensPerIota = formatRatio(NANOS_PER_IOTA, CONTRIBUTION_PRICE_NANOS, 6);
+
     res.json({
       adminWallet: ADMIN_WALLET || null,
+      onChainContributionRequired: REQUIRE_ONCHAIN_CONTRIBUTION,
+      contributionPriceNanoIota: CONTRIBUTION_PRICE_NANOS.toString(),
+      contributionRecipientWallet: CONTRIBUTION_RECIPIENT_WALLET || null,
+      iotaPerToken,
+      tokensPerIota,
     });
   });
 
@@ -76,6 +109,12 @@ export function createApp() {
   app.use("/api/tokens", tokensRouter);
   app.use("/api/rbac/pools", poolsRouter);
   app.use("/api/rbac/compute", computeRouter);
+
+  app.use("/api", (req, res) => {
+    res.status(404).json({
+      error: `Route not found: ${req.method} ${req.originalUrl}`,
+    });
+  });
 
   app.use((error, _req, res, _next) => {
     const status = error.status || 500;

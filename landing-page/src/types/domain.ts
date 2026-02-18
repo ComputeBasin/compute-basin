@@ -168,14 +168,28 @@ export type PoolSummary = {
   title: string;
   description: string;
   location: string;
-  status: "open" | "funded" | "acquired" | "operational" | "closed";
+  status: "open" | "funded" | "acquired" | "operational" | "closed" | "failed";
   site: Site | null;
   landValueTokens: number;
   surplusTokens: number;
   hardCapTokens: number;
   raisedTokens: number;
   percentage: number; // 0-100
+  fundingStartMs?: number;
+  fundingDeadlineMs?: number | null;
+  fundingRemainingMs?: number | null;
+  isFundingExpired?: boolean;
+  isRefundOpen?: boolean;
+  refundedTokens?: number;
   docsCount: number;
+  proofs?: Array<{
+    id: string;
+    name: string;
+    docType: string;
+    iotaTxDigest: string | null;
+    chainMode: "mock" | "live" | null;
+    timestampMs: number | null;
+  }>;
   tokenSymbol: string;
   createdAtMs: number;
   acquisitionProofId?: string;
@@ -188,11 +202,23 @@ export type PoolSummary = {
 export type Contribution = {
   id: string;
   poolId: string;
-  tokenId: string;
+  tokenId?: string;
   walletAddress: string;
   tokenAmount: number;
   valueEur?: number;
+  paymentMode?: "onchain" | "offchain";
+  tokenSettlementMode?: "locked" | "liquid";
+  tokensReleasedAtMs?: number;
   transactionHash?: string;
+  paymentTxDigest?: string;
+  paymentAmountNanoIota?: string;
+  expectedPaymentAmountNanoIota?: string;
+  paymentRecipientWallet?: string;
+  paymentCoinType?: string;
+  refundedAtMs?: number;
+  refundReason?: string;
+  refundTxDigest?: string;
+  refundAmountNanoIota?: string;
   timestampMs: number;
 };
 
@@ -205,6 +231,7 @@ export type WalletBalance = {
 export type WalletSummary = {
   walletAddress: string;
   tokenBalance: number;
+  lockedTokenBalance?: number;
   contributions: Contribution[];
   rentals: ComputeRental[];
 };
@@ -319,6 +346,11 @@ export type Proof = {
 
 export type Meta = {
   adminWallet: string | null;
+  onChainContributionRequired?: boolean;
+  contributionPriceNanoIota?: string;
+  contributionRecipientWallet?: string | null;
+  iotaPerToken?: string | null;
+  tokensPerIota?: string | null;
   platformVersion?: string;
   lastUpdateMs?: number;
 };

@@ -1,22 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useCurrentAccount } from "@iota/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@iota/dapp-kit";
+import { Transaction } from "@iota/iota-sdk/transactions";
 import {
   contributeToPool,
   getComputeOffers,
+  getMeta,
   getPools,
+  refundPoolContribution,
   getWalletSummary,
   rentCompute,
 } from "../services/api";
-import type { ComputeOffer, PoolSummary, WalletSummary } from "../types/domain";
+import type { ComputeOffer, Meta, PoolSummary, WalletSummary } from "../types/domain";
 
 type TabKey = "pools" | "compute";
 
 export function HomePage() {
   const account = useCurrentAccount();
+  const { mutateAsync: signAndExecuteTransaction } = useSignAndExecuteTransaction();
   const wallet = account?.address?.toLowerCase() || "";
 
   const [activeTab, setActiveTab] = useState<TabKey>("pools");
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [pools, setPools] = useState<PoolSummary[]>([]);
   const [offers, setOffers] = useState<ComputeOffer[]>([]);
   const [walletSummary, setWalletSummary] = useState<WalletSummary | null>(null);
@@ -41,12 +46,30 @@ export function HomePage() {
     }
     return offers.filter((offer) => offer.region === selectedLocation);
   }, [offers, selectedLocation]);
+  const poolTitleById = useMemo(
+    () => new Map(pools.map((pool) => [pool.id, pool.title])),
+    [pools]
+  );
+  const recentContributions = useMemo(() => {
+    if (!walletSummary?.contributions) {
+      return [];
+    }
+    return [...walletSummary.contributions]
+      .sort((a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0))
+      .slice(0, 6);
+  }, [walletSummary?.contributions]);
+  const onChainContributionRequired = Boolean(meta?.onChainContributionRequired);
 
   async function load() {
     setLoading(true);
     setError(null);
     try {
-      const [poolData, offerData] = await Promise.all([getPools(), getComputeOffers()]);
+      const [metaData, poolData, offerData] = await Promise.all([
+        getMeta(),
+        getPools(),
+        getComputeOffers(),
+      ]);
+      setMeta(metaData);
       setPools(poolData);
       setOffers(offerData);
       if (wallet) {
@@ -78,17 +101,55 @@ export function HomePage() {
       return;
     }
 
+    if (onChainContributionRequired && !Number.isInteger(amount)) {
+      setError("Token amount must be an integer in on-chain mode");
+      return;
+    }
+
+    let paymentTxDigest: string | undefined;
     try {
       setError(null);
+      if (onChainContributionRequired) {
+        const treasuryWallet = (meta?.contributionRecipientWallet || "").toLowerCase();
+        const priceNanoIota = BigInt(meta?.contributionPriceNanoIota || "0");
+        if (!treasuryWallet || priceNanoIota <= 0n) {
+          throw new Error("Backend contribution payment policy is not configured");
+        }
+        if (wallet === treasuryWallet) {
+          throw new Error(
+            "Connected wallet equals treasury wallet. Switch contributor wallet or configure a dedicated treasury wallet on backend."
+          );
+        }
+
+        const totalPaymentNanoIota = BigInt(amount) * priceNanoIota;
+        const tx = new Transaction();
+        const [paymentCoin] = tx.splitCoins(tx.gas, [totalPaymentNanoIota]);
+        tx.transferObjects([paymentCoin], treasuryWallet);
+
+        const txResult = await signAndExecuteTransaction({
+          transaction: tx,
+          waitForTransaction: true,
+        });
+        paymentTxDigest = txResult.digest;
+      }
+
       await contributeToPool({
         walletAddress: wallet,
         poolId,
         tokenAmount: amount,
+        paymentTxDigest,
       });
       setContributionInputs((prev) => ({ ...prev, [poolId]: 0 }));
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Contribution failed");
+      const message = err instanceof Error ? err.message : "Contribution failed";
+      if (paymentTxDigest) {
+        setError(
+          `IOTA payment was sent (${shortDigest(paymentTxDigest)}), but backend contribution recording failed: ${message}`
+        );
+      } else {
+        setError(message);
+      }
     }
   }
 
@@ -116,6 +177,43 @@ export function HomePage() {
     }
   }
 
+  async function handleRefund(poolId: string) {
+    if (!wallet) {
+      setError("Connect wallet to request refund");
+      return;
+    }
+
+    try {
+      setError(null);
+      await refundPoolContribution({
+        walletAddress: wallet,
+        poolId,
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Refund failed");
+    }
+  }
+
+  function shortDigest(value?: string | null) {
+    if (!value) return "n/a";
+    return `${value.slice(0, 10)}...${value.slice(-8)}`;
+  }
+
+  function formatDate(value?: number | null) {
+    if (!value || !Number.isFinite(value)) return "n/a";
+    return new Date(value).toLocaleString();
+  }
+
+  function txExplorerUrl(txDigest?: string | null) {
+    if (!txDigest) return null;
+    const network =
+      (import.meta.env.VITE_IOTA_NETWORK || "testnet").toLowerCase() === "mainnet"
+        ? "mainnet"
+        : "testnet";
+    return `https://explorer.iota.org/transaction/${txDigest}?network=${network}`;
+  }
+
   return (
     <section className="space-y-5">
       <div className="surface p-6 sm:p-8">
@@ -129,10 +227,29 @@ export function HomePage() {
           A single participant wallet flow: buy tokens by joining pools, then spend the same tokens
           to rent compute from active sites.
         </p>
+        {onChainContributionRequired ? (
+          <p className="mt-2 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-xs text-emerald-100">
+            On-chain mode: each contribution triggers an IOTA transfer to{" "}
+            {meta?.contributionRecipientWallet || "treasury wallet"} at{" "}
+            {meta?.contributionPriceNanoIota || "0"} nanoIOTA per token. Tokens stay locked until
+            pool is funded; if deadline fails, refund is enabled.
+            {meta?.tokensPerIota && meta?.iotaPerToken && (
+              <> Exchange rate: 1 IOTA = {meta.tokensPerIota} SFC ({meta.iotaPerToken} IOTA/SFC).</>
+            )}
+          </p>
+        ) : (
+          <p className="mt-2 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
+            Demo mode: pool contributions update platform balances off-chain. Your wallet IOTA
+            balance is not debited yet.
+          </p>
+        )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
           <span className="rounded-full border border-cyan-300/30 bg-cyan-400/10 px-3 py-1 text-cyan-100">
             Token balance: {walletSummary?.tokenBalance ?? 0} SFC
+          </span>
+          <span className="rounded-full border border-amber-300/30 bg-amber-300/10 px-3 py-1 text-amber-100">
+            Locked: {walletSummary?.lockedTokenBalance ?? 0} SFC
           </span>
           <span className="rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-slate-300">
             Contributions: {walletSummary?.contributions.length ?? 0}
@@ -178,6 +295,72 @@ export function HomePage() {
         </p>
       )}
 
+      {walletSummary && recentContributions.length > 0 && (
+        <div className="surface p-5">
+          <h3 className="text-base font-semibold text-white">Recent contribution activity</h3>
+          <div className="mt-3 grid gap-2">
+            {recentContributions.map((item) => {
+              const paymentUrl = txExplorerUrl(item.paymentTxDigest);
+              const refundUrl = txExplorerUrl(item.refundTxDigest);
+              const settlementLabel = item.refundedAtMs
+                ? "refunded"
+                : item.tokensReleasedAtMs
+                  ? "released"
+                  : item.tokenSettlementMode === "locked"
+                    ? "locked"
+                    : "liquid";
+
+              return (
+                <div
+                  key={item.id}
+                  className="rounded-lg border border-white/10 bg-slate-900/70 px-3 py-2 text-xs"
+                >
+                  <p className="text-slate-200">
+                    {poolTitleById.get(item.poolId) || item.poolId} • {item.tokenAmount} SFC •{" "}
+                    {settlementLabel}
+                  </p>
+                  <p className="mt-0.5 text-slate-400">{formatDate(item.timestampMs)}</p>
+                  {item.paymentTxDigest && (
+                    <p className="mt-1 text-slate-300">
+                      Payment tx:{" "}
+                      {paymentUrl ? (
+                        <a
+                          href={paymentUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-cyan-200 hover:text-cyan-100"
+                        >
+                          {shortDigest(item.paymentTxDigest)}
+                        </a>
+                      ) : (
+                        shortDigest(item.paymentTxDigest)
+                      )}
+                    </p>
+                  )}
+                  {item.refundTxDigest && (
+                    <p className="mt-1 text-amber-200">
+                      Refund tx:{" "}
+                      {refundUrl ? (
+                        <a
+                          href={refundUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-amber-100 hover:text-amber-50"
+                        >
+                          {shortDigest(item.refundTxDigest)}
+                        </a>
+                      ) : (
+                        shortDigest(item.refundTxDigest)
+                      )}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {activeTab === "pools" && (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {pools.map((pool) => (
@@ -191,6 +374,9 @@ export function HomePage() {
 
               <p className="mt-1 text-sm text-slate-300">{pool.location} • {pool.site?.name}</p>
               <p className="mt-2 text-sm text-slate-400">{pool.description || "No description"}</p>
+              <p className="mt-2 text-xs text-slate-400">
+                Funding deadline: {formatDate(pool.fundingDeadlineMs)}
+              </p>
 
               <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
                 <div className="rounded-lg border border-white/10 bg-slate-900/70 p-2">
@@ -237,6 +423,23 @@ export function HomePage() {
                 )}
               </div>
 
+              {pool.proofs && pool.proofs.length > 0 && (
+                <div className="mt-3 grid gap-2">
+                  {pool.proofs.slice(0, 3).map((proof) => (
+                    <Link
+                      key={proof.id}
+                      to={`/proofs/${proof.id}`}
+                      className="rounded-lg border border-white/10 bg-slate-900/70 px-3 py-2 text-xs text-slate-200 hover:border-cyan-300/30"
+                    >
+                      <p className="font-semibold text-cyan-100">{proof.name}</p>
+                      <p className="mt-0.5 text-slate-400">
+                        {proof.docType} • tx {shortDigest(proof.iotaTxDigest)}
+                      </p>
+                    </Link>
+                  ))}
+                </div>
+              )}
+
               <div className="mt-4 flex flex-wrap gap-2">
                 <input
                   type="number"
@@ -256,8 +459,18 @@ export function HomePage() {
                   onClick={() => handleContribute(pool.id)}
                   disabled={pool.status !== "open"}
                 >
-                  Buy pool tokens
+                  {onChainContributionRequired
+                    ? "Contribute (on-chain IOTA)"
+                    : "Contribute (demo ledger)"}
                 </button>
+                {pool.status === "failed" && (
+                  <button
+                    className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-4 py-2 text-sm font-semibold text-amber-100"
+                    onClick={() => handleRefund(pool.id)}
+                  >
+                    Withdraw / Refund
+                  </button>
+                )}
               </div>
             </article>
           ))}
