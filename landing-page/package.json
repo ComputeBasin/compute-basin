@@ -1,5 +1,6 @@
 {
-  "name": "serverfarmchain-landing-page",
+  "name": "computebasin-landing-page",
+  "description": "ComputeBasin - Decentralized Compute Infrastructure Platform Frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",

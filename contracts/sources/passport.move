@@ -1,6 +1,6 @@
 module serverfarmchain::passport {
-    use std::string::String;
     use iota::event;
+    use std::string::String;
 
     const E_INVALID_RESERVATION_UNITS: u64 = 1;
 

@@ -16,4 +16,7 @@ const rawGasBudget = process.env.IOTA_GAS_BUDGET || "100000000";
 export const IOTA_GAS_BUDGET = BigInt(rawGasBudget);
 
 export const ROOT_DIR = process.cwd();
-export const STORE_PATH = path.join(ROOT_DIR, "data", "store.json");
+
+export function getStorePath() {
+  return process.env.STORE_PATH || path.join(ROOT_DIR, "data", "store.json");
+}

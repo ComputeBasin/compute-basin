@@ -1,6 +1,10 @@
 [package]
-name = "serverfarmchain"
-edition = "2024"
+name = "computebasin"
+edition = "2024.beta"
+
+[dependencies]
+Iota = { git = "https://github.com/iotaledger/iota.git", subdir = "crates/iota-framework/packages/iota-framework", rev = "testnet", override = true }
 
 [addresses]
+computebasin = "0x0"
 serverfarmchain = "0x0"

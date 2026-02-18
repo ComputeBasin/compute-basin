@@ -1,8 +1,9 @@
 import { promises as fs } from "node:fs";
-import { STORE_PATH } from "./config.js";
+import { getStorePath } from "./config.js";
 
 function normalizeStore(raw) {
   const store = {
+    // Legacy structures (being phased out)
     sites: Array.isArray(raw.sites) ? raw.sites : [],
     pools: Array.isArray(raw.pools) ? raw.pools : [],
     proofs: Array.isArray(raw.proofs) ? raw.proofs : [],
@@ -13,18 +14,33 @@ function normalizeStore(raw) {
         : {},
     computeOffers: Array.isArray(raw.computeOffers) ? raw.computeOffers : [],
     rentals: Array.isArray(raw.rentals) ? raw.rentals : [],
+
+    // New structures for refined ComputeBasin model
+    properties: Array.isArray(raw.properties) ? raw.properties : [],
+    hardwareSpecs: Array.isArray(raw.hardwareSpecs) ? raw.hardwareSpecs : [],
+    userRoles: Array.isArray(raw.userRoles) ? raw.userRoles : [],
+    assetTokens: Array.isArray(raw.assetTokens) ? raw.assetTokens : [],
+    tokenAllocations: Array.isArray(raw.tokenAllocations)
+      ? raw.tokenAllocations
+      : [],
+    userProfiles: Array.isArray(raw.userProfiles) ? raw.userProfiles : [],
+    rbacPools: Array.isArray(raw.rbacPools) ? raw.rbacPools : [],
+    rbacComputeOffers: Array.isArray(raw.rbacComputeOffers)
+      ? raw.rbacComputeOffers
+      : [],
+    rbacRentals: Array.isArray(raw.rbacRentals) ? raw.rbacRentals : [],
   };
 
   return store;
 }
 
 export async function readStore() {
-  const raw = await fs.readFile(STORE_PATH, "utf8");
+  const raw = await fs.readFile(getStorePath(), "utf8");
   return normalizeStore(JSON.parse(raw));
 }
 
 export async function writeStore(store) {
-  await fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
+  await fs.writeFile(getStorePath(), JSON.stringify(store, null, 2), "utf8");
 }
 
 export function getSiteOrThrow(store, siteId) {

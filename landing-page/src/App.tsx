@@ -39,10 +39,10 @@ export default function App() {
         <div className="mx-auto flex w-[min(1200px,94vw)] items-center justify-between gap-4 py-4">
           <div>
             <p className="text-xs uppercase tracking-[0.22em] text-cyan-300/80">
-              IOTA testnet
+              Decentralized Compute Infrastructure
             </p>
             <h1 className="text-lg font-semibold text-white sm:text-2xl">
-              ServerFarmChain
+              ComputeBasin
             </h1>
             <div className="mt-2 flex gap-2 text-xs sm:text-sm">
               <Link className="rounded-full border border-white/10 px-3 py-1 text-slate-200 hover:text-cyan-200" to="/">
