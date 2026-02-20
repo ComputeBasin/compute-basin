@@ -337,6 +337,9 @@ export type Proof = {
   timestampMs: number;
   iotaObjectId?: string;
   iotaTxDigest?: string;
+  iotaSignedBy?: string | null;
+  notarizationProvider?: string;
+  batchIndex?: number;
   chainMode: "mock" | "live";
 };
 
@@ -346,6 +349,10 @@ export type Proof = {
 
 export type Meta = {
   adminWallet: string | null;
+  iotaMode?: "mock" | "live";
+  iotaBackendSigner?: string | null;
+  notarizationProvider?: string;
+  notarizationSignerMatchesAdmin?: boolean | null;
   onChainContributionRequired?: boolean;
   contributionPriceNanoIota?: string;
   contributionRecipientWallet?: string | null;
@@ -368,4 +375,8 @@ export type Site = {
   status: string;
   tags: string[];
   iotaSiteObjectId?: string;
+  iotaSiteTxDigest?: string | null;
+  iotaChainMode?: "mock" | "live" | null;
+  iotaNotarizationProvider?: string;
+  createdAtMs?: number;
 };

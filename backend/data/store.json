@@ -47,6 +47,43 @@
         "Expansion-ready"
       ],
       "iotaSiteObjectId": "0x2369c3deef0c75b6a50b6a5ce214d8c2492915c77d3f1bb0d95a96220459a712"
+    },
+    {
+      "id": "SITE-10",
+      "name": "Capannone Schio Alta",
+      "siteType": "Land",
+      "areaM2": 1000,
+      "targetKw": 100,
+      "approxLocation": "Nord-est italia",
+      "owner": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "computeReady": true,
+      "status": "seed",
+      "tags": [
+        "manutenzione strutturale richiesta"
+      ],
+      "iotaSiteObjectId": "0x268afbbc520e449ca39a2e5f31161d33",
+      "iotaSiteTxDigest": "0x0b9d795da15041d1a425835775a71940",
+      "iotaChainMode": "mock",
+      "createdAtMs": 1771501926756
+    },
+    {
+      "id": "SITE-011",
+      "name": "Notarizzare-TorinoEst",
+      "siteType": "Land",
+      "areaM2": 1009,
+      "targetKw": 10000,
+      "approxLocation": "Lingotto",
+      "owner": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "computeReady": true,
+      "status": "seed",
+      "tags": [
+        "Fiber-missing"
+      ],
+      "iotaSiteObjectId": "0xc319e54f642a433c8784b4b4c3690c3b",
+      "iotaSiteTxDigest": "0x4af99a5e2ed540e3b61e4231f83be834",
+      "iotaChainMode": "mock",
+      "iotaNotarizationProvider": "passport",
+      "createdAtMs": 1771578881448
     }
   ],
   "pools": [
@@ -61,7 +98,61 @@
       "landValueTokens": 100000,
       "surplusTokens": 50000,
       "hardCapTokens": 150000,
-      "raisedTokens": 3040,
+      "raisedTokens": 3140,
+      "tokenSymbol": "SFC",
+      "acquisitionProofId": null,
+      "computeOfferId": null
+    },
+    {
+      "id": "pool_c5794898-cb8f-428f-9870-d5d1fa494ac6",
+      "siteId": "SITE-002",
+      "title": "campo 2",
+      "description": "sud africa capannone",
+      "location": "Sud africa",
+      "status": "open",
+      "createdAtMs": 1771438197136,
+      "fundingStartMs": 1771438197136,
+      "fundingDeadlineMs": 1774030197136,
+      "landValueTokens": 100000,
+      "surplusTokens": 10000,
+      "hardCapTokens": 110000,
+      "raisedTokens": 0,
+      "tokenSymbol": "SFC",
+      "acquisitionProofId": null,
+      "computeOfferId": null
+    },
+    {
+      "id": "pool_b8061795-fa62-4ea4-8dc0-f1b9bf3a8f00",
+      "siteId": "SITE-10",
+      "title": "Ste Pool test",
+      "description": "1000 metri quadri di terreno edificabile con un capannone in disuso",
+      "location": "Via Meneguzzo",
+      "status": "open",
+      "createdAtMs": 1771502220605,
+      "fundingStartMs": 1771502220605,
+      "fundingDeadlineMs": 1774094220605,
+      "landValueTokens": 50000,
+      "surplusTokens": 25000,
+      "hardCapTokens": 75000,
+      "raisedTokens": 1000,
+      "tokenSymbol": "SFC",
+      "acquisitionProofId": null,
+      "computeOfferId": null
+    },
+    {
+      "id": "pool_1e713089-152f-4097-879d-092598c116d6",
+      "siteId": "SITE-011",
+      "title": "Lingotto Fabbricato",
+      "description": "Mancanza della fibra",
+      "location": "Torino sud",
+      "status": "open",
+      "createdAtMs": 1771578985452,
+      "fundingStartMs": 1771578985452,
+      "fundingDeadlineMs": 1774170985452,
+      "landValueTokens": 50,
+      "surplusTokens": 25,
+      "hardCapTokens": 75,
+      "raisedTokens": 0,
       "tokenSymbol": "SFC",
       "acquisitionProofId": null,
       "computeOfferId": null
@@ -81,6 +172,65 @@
       "iotaObjectId": "0x4f661bd5c9244fe99d68afa5eaee0072",
       "iotaTxDigest": "0x7fd6632f77af4a98a7f5e81c7d60e4cb",
       "chainMode": "mock"
+    },
+    {
+      "id": "proof_d9329459-7314-4182-81b7-fc2e4751bf18",
+      "poolId": "pool_c5794898-cb8f-428f-9870-d5d1fa494ac6",
+      "siteId": "SITE-002",
+      "name": "Planimetria 1",
+      "docType": "planimetria",
+      "driveUrl": "https://docs.google.com/document/d/1NCajieTXJ8ONTuzwpPoQ1EPXznQ_Rtcb/edit?usp=drive_link&ouid=112161778876786244408&rtpof=true&sd=true",
+      "docHashSha256": "8c43654e0dcf5bf1355e0c0418c406ddee55be838dddbceae5de56989b911c69",
+      "issuer": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "timestampMs": 1771438197140,
+      "iotaObjectId": "0x247ccd51ce914df9823db08480477aa3",
+      "iotaTxDigest": "0xfa47b6035f4149c09b25417bd27b5d0a",
+      "chainMode": "mock"
+    },
+    {
+      "id": "proof_a2b23fd8-d3a7-468c-a8f9-064b98084d0c",
+      "poolId": "pool_b8061795-fa62-4ea4-8dc0-f1b9bf3a8f00",
+      "siteId": "SITE-10",
+      "name": "Planimetria 1",
+      "docType": "Planimetria ",
+      "driveUrl": "https://docs.google.com/spreadsheets/d/1uKhUh1cf1vuowEzGotQSDTOPJmZVgP_9KuBei2n48Ow/edit?usp=drive_link",
+      "docHashSha256": "2a2236f96954a37a4bb2a95dcb3f5f487e802740364b294d85eb148a2fe8974d",
+      "issuer": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "timestampMs": 1771502220609,
+      "iotaObjectId": "0x895514d57b6547008b47505d70950d43",
+      "iotaTxDigest": "0x9437ead0079c48dca6942cd88fd5f8aa",
+      "chainMode": "mock"
+    },
+    {
+      "id": "proof_b7a9b3b4-ca80-4b7c-80cc-5ddfc123ce42",
+      "poolId": "pool_b8061795-fa62-4ea4-8dc0-f1b9bf3a8f00",
+      "siteId": "SITE-10",
+      "name": "Planimetria 2",
+      "docType": "Planimetria campo esterno",
+      "driveUrl": "https://docs.google.com/document/d/1vtFhfvef18x5ATOhUobP6q8X3keK2AifFOPVc29m6ho/edit?usp=drive_link",
+      "docHashSha256": "237c766ab62e984bd3e7d29295c314d2531161a0b9e293296f612d8b6d3edcde",
+      "issuer": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "timestampMs": 1771502220610,
+      "iotaObjectId": "0x0aa4c22dfe024fffa3b6f18791931263",
+      "iotaTxDigest": "0x82738b3df1c84a6ea0dfa8b48f461a5a",
+      "chainMode": "mock"
+    },
+    {
+      "id": "proof_0405ea12-4af2-47ce-a7b6-d7f59a390a7d",
+      "poolId": "pool_1e713089-152f-4097-879d-092598c116d6",
+      "siteId": "SITE-011",
+      "name": "Planimetria 1",
+      "docType": "Planimetria",
+      "driveUrl": "https://docs.google.com/document/d/1NCajieTXJ8ONTuzwpPoQ1EPXznQ_Rtcb/edit?usp=drive_link&ouid=112161778876786244408&rtpof=true&sd=true",
+      "docHashSha256": "411a62b2154cad7e2fee73d836a875350a9343eeb66d6f58c8899993ca20c24a",
+      "issuer": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "timestampMs": 1771578985456,
+      "iotaObjectId": "0x0ee6c1ca70fb450aaf1eb0360b592b6e",
+      "iotaTxDigest": "0x3a860c93b411483da796a49e240c26c8",
+      "iotaSignedBy": null,
+      "chainMode": "mock",
+      "notarizationProvider": "passport",
+      "batchIndex": 0
     }
   ],
   "contributions": [
@@ -129,13 +279,43 @@
       "paymentAmountNanoIota": "20000000",
       "expectedPaymentAmountNanoIota": "20000000",
       "paymentRecipientWallet": "0x1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "contrib_32e16203-0654-48fc-afd6-4fdb8d452b5b",
+      "poolId": "pool_c2080217-3daa-473d-9b1b-981d3a576c27",
+      "walletAddress": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "tokenAmount": 100,
+      "paymentMode": "onchain",
+      "tokenSettlementMode": "locked",
+      "timestampMs": 1771437942501,
+      "transactionHash": "5vN4c4LtC2zmsVUQs8S7nZdshcqRtpEB9gS241sXwjk9",
+      "paymentTxDigest": "5vN4c4LtC2zmsVUQs8S7nZdshcqRtpEB9gS241sXwjk9",
+      "paymentCoinType": "0x2::iota::IOTA",
+      "paymentAmountNanoIota": "100000000",
+      "expectedPaymentAmountNanoIota": "100000000",
+      "paymentRecipientWallet": "0x1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "contrib_1f47f210-8aa0-4618-a2f0-34cc0724ad0e",
+      "poolId": "pool_b8061795-fa62-4ea4-8dc0-f1b9bf3a8f00",
+      "walletAddress": "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2",
+      "tokenAmount": 1000,
+      "paymentMode": "onchain",
+      "tokenSettlementMode": "locked",
+      "timestampMs": 1771502470606,
+      "transactionHash": "AVBbAkoSebzAjFRwaatp2jHivr1S4UBTbrGKiv7qW6PT",
+      "paymentTxDigest": "AVBbAkoSebzAjFRwaatp2jHivr1S4UBTbrGKiv7qW6PT",
+      "paymentCoinType": "0x2::iota::IOTA",
+      "paymentAmountNanoIota": "1000000000",
+      "expectedPaymentAmountNanoIota": "1000000000",
+      "paymentRecipientWallet": "0x1111111111111111111111111111111111111111111111111111111111111111"
     }
   ],
   "walletBalances": {
     "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2": 3020
   },
   "walletLockedBalances": {
-    "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2": 20
+    "0xfa95e1ddd02e752e157152ab69c0f94cbd46059133011c4edcadc99b8da640e2": 1120
   },
   "computeOffers": [],
   "rentals": [],

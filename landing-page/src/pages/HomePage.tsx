@@ -28,7 +28,7 @@ export function HomePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [contributionInputs, setContributionInputs] = useState<Record<string, number>>({});
+  const [contributionInputs, setContributionInputs] = useState<Record<string, string>>({});
   const [renting, setRenting] = useState<{ offerId: string; units: number; hours: number }>({
     offerId: "",
     units: 1,
@@ -95,23 +95,33 @@ export function HomePage() {
       return;
     }
 
-    const amount = Number(contributionInputs[poolId] || 0);
-    if (amount <= 0) {
-      setError("Token amount must be > 0");
+    const rawAmount = (contributionInputs[poolId] || "").trim();
+    if (!/^[0-9]+$/.test(rawAmount)) {
+      setError("Token amount must be a positive integer");
       return;
     }
 
-    if (onChainContributionRequired && !Number.isInteger(amount)) {
-      setError("Token amount must be an integer in on-chain mode");
+    const parsedAmount = BigInt(rawAmount);
+    if (parsedAmount <= 0n) {
+      setError("Token amount must be > 0");
       return;
     }
+    if (parsedAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      setError(`Token amount exceeds safe limit (${Number.MAX_SAFE_INTEGER})`);
+      return;
+    }
+    const amount = Number(parsedAmount);
 
     let paymentTxDigest: string | undefined;
     try {
       setError(null);
       if (onChainContributionRequired) {
         const treasuryWallet = (meta?.contributionRecipientWallet || "").toLowerCase();
-        const priceNanoIota = BigInt(meta?.contributionPriceNanoIota || "0");
+        const rawPriceNanoIota = meta?.contributionPriceNanoIota || "0";
+        if (!/^[0-9]+$/.test(rawPriceNanoIota)) {
+          throw new Error("Backend contribution price configuration is invalid");
+        }
+        const priceNanoIota = BigInt(rawPriceNanoIota);
         if (!treasuryWallet || priceNanoIota <= 0n) {
           throw new Error("Backend contribution payment policy is not configured");
         }
@@ -121,7 +131,7 @@ export function HomePage() {
           );
         }
 
-        const totalPaymentNanoIota = BigInt(amount) * priceNanoIota;
+        const totalPaymentNanoIota = parsedAmount * priceNanoIota;
         const tx = new Transaction();
         const [paymentCoin] = tx.splitCoins(tx.gas, [totalPaymentNanoIota]);
         tx.transferObjects([paymentCoin], treasuryWallet);
@@ -139,7 +149,7 @@ export function HomePage() {
         tokenAmount: amount,
         paymentTxDigest,
       });
-      setContributionInputs((prev) => ({ ...prev, [poolId]: 0 }));
+      setContributionInputs((prev) => ({ ...prev, [poolId]: "" }));
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Contribution failed";
@@ -153,12 +163,13 @@ export function HomePage() {
     }
   }
 
-  async function handleRent() {
+  async function handleRent(offerIdOverride?: string) {
     if (!wallet) {
       setError("Connect wallet to rent compute");
       return;
     }
-    if (!renting.offerId) {
+    const selectedOfferId = offerIdOverride || renting.offerId;
+    if (!selectedOfferId) {
       setError("Select a compute offer");
       return;
     }
@@ -167,10 +178,11 @@ export function HomePage() {
       setError(null);
       await rentCompute({
         walletAddress: wallet,
-        offerId: renting.offerId,
+        offerId: selectedOfferId,
         units: Number(renting.units),
         hours: Number(renting.hours),
       });
+      setRenting((prev) => ({ ...prev, offerId: selectedOfferId }));
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Rental failed");
@@ -214,6 +226,44 @@ export function HomePage() {
     return `https://explorer.iota.org/transaction/${txDigest}?network=${network}`;
   }
 
+  function formatNanoIotaToIota(nanoIota: bigint, maxDecimals = 6) {
+    const base = 1_000_000_000n;
+    const whole = nanoIota / base;
+    const remainder = nanoIota % base;
+    if (remainder === 0n) {
+      return whole.toString();
+    }
+    const decimals = Math.max(0, Math.min(9, maxDecimals));
+    const scaled = (remainder * 10n ** BigInt(decimals)) / base;
+    const fraction = scaled.toString().padStart(decimals, "0").replace(/0+$/, "");
+    return fraction ? `${whole.toString()}.${fraction}` : whole.toString();
+  }
+
+  function getContributionPreview(poolId: string) {
+    const rawAmount = (contributionInputs[poolId] || "").trim();
+    if (!/^[0-9]+$/.test(rawAmount)) {
+      return null;
+    }
+    const tokenAmount = BigInt(rawAmount);
+    if (tokenAmount <= 0n) {
+      return null;
+    }
+    const rawPriceNano = meta?.contributionPriceNanoIota || "0";
+    if (!/^[0-9]+$/.test(rawPriceNano)) {
+      return null;
+    }
+    const priceNano = BigInt(rawPriceNano);
+    if (priceNano <= 0n) {
+      return null;
+    }
+    const totalNano = tokenAmount * priceNano;
+    return {
+      tokenAmount: tokenAmount.toString(),
+      totalNano: totalNano.toString(),
+      totalIota: formatNanoIotaToIota(totalNano, 9),
+    };
+  }
+
   return (
     <section className="space-y-5">
       <div className="surface p-6 sm:p-8">
@@ -229,18 +279,30 @@ export function HomePage() {
         </p>
         {onChainContributionRequired ? (
           <p className="mt-2 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-xs text-emerald-100">
-            On-chain mode: each contribution triggers an IOTA transfer to{" "}
+            On-chain mode ({meta?.iotaMode || "unknown"}): each contribution triggers an IOTA transfer to{" "}
             {meta?.contributionRecipientWallet || "treasury wallet"} at{" "}
             {meta?.contributionPriceNanoIota || "0"} nanoIOTA per token. Tokens stay locked until
             pool is funded; if deadline fails, refund is enabled.
             {meta?.tokensPerIota && meta?.iotaPerToken && (
               <> Exchange rate: 1 IOTA = {meta.tokensPerIota} SFC ({meta.iotaPerToken} IOTA/SFC).</>
             )}
+            {meta?.notarizationProvider && (
+              <> Notarization provider: {meta.notarizationProvider}.</>
+            )}
+            {meta?.iotaMode === "mock" && (
+              <> Notarization digests are synthetic in mock mode and not visible on explorer.</>
+            )}
           </p>
         ) : (
           <p className="mt-2 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
             Demo mode: pool contributions update platform balances off-chain. Your wallet IOTA
             balance is not debited yet.
+          </p>
+        )}
+
+        {meta?.notarizationSignerMatchesAdmin === false && (
+          <p className="mt-2 rounded-lg border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-200">
+            Warning: live notarization signer does not match admin wallet. Fix backend signer configuration.
           </p>
         )}
 
@@ -363,8 +425,10 @@ export function HomePage() {
 
       {activeTab === "pools" && (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {pools.map((pool) => (
-            <article key={pool.id} className="surface p-5">
+          {pools.map((pool) => {
+            const contributionPreview = getContributionPreview(pool.id);
+            return (
+              <article key={pool.id} className="surface p-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-lg font-semibold text-white">{pool.title}</h3>
                 <span className="rounded-full border border-white/10 bg-slate-900 px-2 py-1 text-xs text-slate-300">
@@ -442,15 +506,16 @@ export function HomePage() {
 
               <div className="mt-4 flex flex-wrap gap-2">
                 <input
-                  type="number"
-                  min={1}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
                   className="w-32 rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-sm"
                   placeholder="Tokens"
                   value={contributionInputs[pool.id] || ""}
                   onChange={(event) =>
                     setContributionInputs((prev) => ({
                       ...prev,
-                      [pool.id]: Number(event.target.value),
+                      [pool.id]: event.target.value,
                     }))
                   }
                 />
@@ -472,8 +537,15 @@ export function HomePage() {
                   </button>
                 )}
               </div>
-            </article>
-          ))}
+              {onChainContributionRequired && contributionPreview && (
+                <p className="mt-2 text-xs text-emerald-200">
+                  Wallet signature amount: {contributionPreview.totalIota} IOTA (
+                  {contributionPreview.totalNano} nanoIOTA)
+                </p>
+              )}
+              </article>
+            );
+          })}
         </div>
       )}
 
@@ -599,8 +671,7 @@ export function HomePage() {
                     <button
                       className="rounded-lg bg-gradient-to-r from-cyan-300 to-emerald-300 px-4 py-2 text-sm font-semibold text-slate-900"
                       onClick={() => {
-                        setRenting((prev) => ({ ...prev, offerId: offer.id }));
-                        handleRent();
+                        handleRent(offer.id);
                       }}
                       disabled={offer.availableUnits <= 0}
                     >

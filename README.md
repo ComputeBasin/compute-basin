@@ -30,6 +30,11 @@ cd landing-page && npm install && npm run dev
 
 Open http://localhost:5173
 
+Optional backend env for notarization provider:
+
+- `IOTA_NOTARIZATION_PROVIDER=passport` (default, uses local `passport.move`)
+- `IOTA_NOTARIZATION_PROVIDER=official_locked` (uses official `@iota/notarization` locked method)
+
 ## CI/CD
 
 GitHub Actions workflows:
@@ -43,3 +48,5 @@ GitHub Actions workflows:
 
 - Workflow and market gap analysis: `docs/workflow_gap_analysis.md`
 - Hackathon eligibility notes: `docs/hackathon_eligibility.md`
+- Objective alignment audit (current vs target workflow): `docs/objective_alignment_audit_2026-02-19.md`
+- Platform best-practice review: `docs/platform_best_practice_review_2026-02-20.md`

@@ -11,6 +11,14 @@ export const IOTA_NETWORK = process.env.IOTA_NETWORK || "testnet";
 export const IOTA_FULLNODE_URL = process.env.IOTA_FULLNODE_URL || "";
 export const IOTA_PACKAGE_ID = process.env.IOTA_PACKAGE_ID || "";
 export const IOTA_SIGNER_SECRET_KEY = process.env.IOTA_SIGNER_SECRET_KEY || "";
+const rawNotarizationProvider = (
+  process.env.IOTA_NOTARIZATION_PROVIDER || "passport"
+).toLowerCase();
+export const IOTA_NOTARIZATION_PROVIDER =
+  rawNotarizationProvider === "official" ||
+  rawNotarizationProvider === "official_locked"
+    ? "official_locked"
+    : "passport";
 
 const rawGasBudget = process.env.IOTA_GAS_BUDGET || "100000000";
 export const IOTA_GAS_BUDGET = BigInt(rawGasBudget);

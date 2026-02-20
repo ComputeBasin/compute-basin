@@ -5,6 +5,7 @@ import {
   ADMIN_WALLET,
   CORS_ORIGIN,
   MOCK_IOTA,
+  IOTA_NOTARIZATION_PROVIDER,
   REQUIRE_ONCHAIN_CONTRIBUTION,
   CONTRIBUTION_PRICE_NANOS,
   CONTRIBUTION_RECIPIENT_WALLET,
@@ -68,9 +69,18 @@ export function createApp() {
   app.get("/api/meta", (_req, res) => {
     const iotaPerToken = formatRatio(CONTRIBUTION_PRICE_NANOS, NANOS_PER_IOTA, 9);
     const tokensPerIota = formatRatio(NANOS_PER_IOTA, CONTRIBUTION_PRICE_NANOS, 6);
+    const backendSigner = getBackendSignerAddress();
+    const normalizedAdmin = (ADMIN_WALLET || "").toLowerCase();
+    const normalizedSigner = (backendSigner || "").toLowerCase();
+    const notarizationSignerMatchesAdmin =
+      normalizedAdmin && normalizedSigner ? normalizedAdmin === normalizedSigner : null;
 
     res.json({
       adminWallet: ADMIN_WALLET || null,
+      iotaMode: MOCK_IOTA ? "mock" : "live",
+      iotaBackendSigner: backendSigner,
+      notarizationProvider: IOTA_NOTARIZATION_PROVIDER,
+      notarizationSignerMatchesAdmin,
       onChainContributionRequired: REQUIRE_ONCHAIN_CONTRIBUTION,
       contributionPriceNanoIota: CONTRIBUTION_PRICE_NANOS.toString(),
       contributionRecipientWallet: CONTRIBUTION_RECIPIENT_WALLET || null,

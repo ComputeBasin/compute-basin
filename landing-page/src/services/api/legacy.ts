@@ -23,6 +23,30 @@ export async function getSites() {
   return data.sites;
 }
 
+export async function createSite(input: {
+  walletAddress: string;
+  id?: string;
+  name: string;
+  siteType: string;
+  areaM2: number;
+  targetKw: number;
+  approxLocation: string;
+  owner?: string;
+  computeReady?: boolean;
+  status?: string;
+  tags?: string[];
+  mintOnIota?: boolean;
+  iotaSiteObjectId?: string;
+}) {
+  return fetchJson<{ site: Site }>(
+    "/admin/sites",
+    withWallet(input.walletAddress, {
+      method: "POST",
+      body: JSON.stringify(input),
+    })
+  );
+}
+
 export async function getPools() {
   const data = await fetchJson<{ pools: PoolSummary[] }>("/pools");
   return data.pools;
@@ -178,6 +202,45 @@ export async function upsertComputeOffer(input: {
   );
 }
 
+export async function finalizePoolDocuments(input: {
+  walletAddress: string;
+  poolId: string;
+  documents: Array<{
+    name: string;
+    docType: string;
+    driveUrl: string;
+    docHashSha256?: string;
+  }>;
+}) {
+  const poolId = input.poolId?.trim();
+  if (!poolId) {
+    throw new Error("poolId is required");
+  }
+  if (!Array.isArray(input.documents) || input.documents.length === 0) {
+    throw new Error("documents array is required");
+  }
+
+  return fetchJson<{
+    pool: Pool;
+    proofs: Proof[];
+    notarization: {
+      txDigest: string | null;
+      chainMode: "mock" | "live";
+      provider: string;
+      signedBy: string | null;
+      proofCount: number;
+    };
+  }>(
+    `/admin/pools/${poolId}/documents/finalize`,
+    withWallet(input.walletAddress, {
+      method: "POST",
+      body: JSON.stringify({
+        documents: input.documents,
+      }),
+    })
+  );
+}
+
 export async function getComputeOffers(location?: string) {
   const query = location ? `?location=${encodeURIComponent(location)}` : "";
   const data = await fetchJson<{ offers: ComputeOffer[] }>(`/compute/offers${query}`);
@@ -210,4 +273,27 @@ export async function getWalletSummary(walletAddress: string) {
 export async function getProof(proofId: string) {
   const data = await fetchJson<{ proof: Proof }>(`/proofs/${proofId}`);
   return data.proof;
+}
+
+export async function verifyProofHash(input: {
+  proofId: string;
+  docHashSha256: string;
+}) {
+  return fetchJson<{
+    proofId: string;
+    expectedHash: string;
+    providedHash: string;
+    hashAlgorithm: string;
+    match: boolean;
+    chainMode: "mock" | "live" | null;
+    iotaTxDigest: string | null;
+  }>(`/proofs/${input.proofId}/verify-hash`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      docHashSha256: input.docHashSha256,
+    }),
+  });
 }

@@ -138,6 +138,10 @@ test("health, meta and auth roles expose expected contract", async () => {
     const meta = await request(server.baseUrl, "/api/meta");
     assert.equal(meta.status, 200);
     assert.equal(meta.payload.adminWallet, ADMIN_WALLET);
+    assert.equal(meta.payload.iotaMode, "mock");
+    assert.equal(meta.payload.iotaBackendSigner, null);
+    assert.equal(meta.payload.notarizationProvider, "passport");
+    assert.equal(meta.payload.notarizationSignerMatchesAdmin, null);
     assert.equal(meta.payload.onChainContributionRequired, false);
     assert.equal(meta.payload.contributionPriceNanoIota, "1000000");
     assert.equal(meta.payload.contributionRecipientWallet, ADMIN_WALLET);
@@ -151,6 +155,188 @@ test("health, meta and auth roles expose expected contract", async () => {
     assert.equal(roles.payload.walletAddress, SRL_WALLET);
     assert.deepEqual(roles.payload.roles, ["srl"]);
     assert.equal(roles.payload.kycStatus, "verified");
+  } finally {
+    await server.close();
+  }
+});
+
+test("Legacy admin can register a site before creating pools", async () => {
+  const server = await startServer(makeStore());
+  try {
+    const siteRes = await request(server.baseUrl, "/api/admin/sites", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: {
+        name: "South Edge Campus",
+        siteType: "Warehouse",
+        areaM2: 9000,
+        targetKw: 450,
+        approxLocation: "Sud Italia - Sicilia",
+        tags: ["fiber-near", "new-build"],
+      },
+    });
+    assert.equal(siteRes.status, 201);
+    assert.equal(siteRes.payload.site.id, "SITE-002");
+    assert.equal(siteRes.payload.site.name, "South Edge Campus");
+    assert.ok(siteRes.payload.site.iotaSiteObjectId);
+    assert.equal(siteRes.payload.site.iotaChainMode, "mock");
+    assert.equal(siteRes.payload.site.iotaNotarizationProvider, "passport");
+
+    const listSites = await request(server.baseUrl, "/api/sites");
+    assert.equal(listSites.status, 200);
+    assert.equal(listSites.payload.sites.length, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("Legacy pool creation notarizes uploaded docs in one batch transaction", async () => {
+  const server = await startServer(makeStore());
+  try {
+    const createPoolRes = await request(server.baseUrl, "/api/admin/pools", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: {
+        siteId: "SITE-001",
+        title: "Batch Notarization Pool",
+        description: "Batch tx notarization check",
+        location: "Lombardia",
+        landValueTokens: 10,
+        surplusTokens: 5,
+        documents: [
+          {
+            name: "Doc A",
+            docType: "title_deed",
+            driveUrl: "https://example.com/a",
+          },
+          {
+            name: "Doc B",
+            docType: "cost_sheet",
+            driveUrl: "https://example.com/b",
+          },
+        ],
+      },
+    });
+    assert.equal(createPoolRes.status, 201);
+    const poolId = createPoolRes.payload.pool.id;
+
+    const poolDetails = await request(server.baseUrl, `/api/pools/${poolId}`);
+    assert.equal(poolDetails.status, 200);
+    assert.equal(poolDetails.payload.proofs.length, 2);
+
+    const [proofA, proofB] = poolDetails.payload.proofs;
+    assert.ok(proofA.iotaTxDigest);
+    assert.equal(proofA.iotaTxDigest, proofB.iotaTxDigest);
+    assert.equal(proofA.notarizationProvider, "passport");
+    assert.equal(proofB.notarizationProvider, "passport");
+  } finally {
+    await server.close();
+  }
+});
+
+test("Legacy admin can finalize additional pool documents in one batch transaction", async () => {
+  const server = await startServer(makeStore());
+  try {
+    const createPoolRes = await request(server.baseUrl, "/api/admin/pools", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: {
+        siteId: "SITE-001",
+        title: "Finalize Docs Pool",
+        description: "Finalize docs flow",
+        location: "Piemonte",
+        landValueTokens: 50,
+        surplusTokens: 10,
+        documents: [
+          {
+            name: "Seed Doc",
+            docType: "title_deed",
+            driveUrl: "https://example.com/seed",
+          },
+        ],
+      },
+    });
+    assert.equal(createPoolRes.status, 201);
+    const poolId = createPoolRes.payload.pool.id;
+
+    const finalizeRes = await request(
+      server.baseUrl,
+      `/api/admin/pools/${poolId}/documents/finalize`,
+      {
+        method: "POST",
+        wallet: ADMIN_WALLET,
+        body: {
+          documents: [
+            {
+              name: "Electrical Layout",
+              docType: "electrical_layout",
+              driveUrl: "https://example.com/electrical",
+            },
+            {
+              name: "Maintenance Plan",
+              docType: "maintenance_plan",
+              driveUrl: "https://example.com/maintenance",
+            },
+          ],
+        },
+      }
+    );
+    assert.equal(finalizeRes.status, 201);
+    assert.equal(finalizeRes.payload.proofs.length, 2);
+    assert.equal(
+      finalizeRes.payload.proofs[0].iotaTxDigest,
+      finalizeRes.payload.proofs[1].iotaTxDigest
+    );
+    assert.equal(finalizeRes.payload.notarization.provider, "passport");
+
+    const poolDetails = await request(server.baseUrl, `/api/pools/${poolId}`);
+    assert.equal(poolDetails.status, 200);
+    assert.equal(poolDetails.payload.proofs.length, 3);
+  } finally {
+    await server.close();
+  }
+});
+
+test("Proof hash verification validates SHA-256 format", async () => {
+  const server = await startServer(makeStore());
+  try {
+    const createPoolRes = await request(server.baseUrl, "/api/admin/pools", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: {
+        siteId: "SITE-001",
+        title: "Hash Validation Pool",
+        description: "hash validation",
+        location: "Lombardia",
+        landValueTokens: 20,
+        surplusTokens: 10,
+        documents: [
+          {
+            name: "Title deed",
+            docType: "title_deed",
+            driveUrl: "https://example.com/title",
+          },
+        ],
+      },
+    });
+    assert.equal(createPoolRes.status, 201);
+    const poolId = createPoolRes.payload.pool.id;
+
+    const poolDetails = await request(server.baseUrl, `/api/pools/${poolId}`);
+    const proofId = poolDetails.payload.proofs[0].id;
+
+    const invalidHashRes = await request(
+      server.baseUrl,
+      `/api/proofs/${proofId}/verify-hash`,
+      {
+        method: "POST",
+        body: {
+          docHashSha256: "abc123",
+        },
+      }
+    );
+    assert.equal(invalidHashRes.status, 400);
+    assert.match(invalidHashRes.payload.error, /64-char SHA-256 hex string/);
   } finally {
     await server.close();
   }
@@ -419,6 +605,114 @@ test("Legacy flow: failed pool allows contributor refund after deadline", async 
     assert.equal(walletSummary.payload.lockedTokenBalance, 0);
     assert.equal(walletSummary.payload.contributions.length, 1);
     assert.ok(walletSummary.payload.contributions[0].refundedAtMs);
+  } finally {
+    await server.close();
+  }
+});
+
+test("Legacy flow: expired rental releases compute capacity automatically", async () => {
+  const server = await startServer(makeStore());
+  try {
+    const createPoolRes = await request(server.baseUrl, "/api/admin/pools", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: {
+        siteId: "SITE-001",
+        title: "Auto-release Pool",
+        description: "Rental capacity release flow",
+        location: "Lombardia",
+        landValueTokens: 40,
+        surplusTokens: 10,
+        documents: [
+          {
+            name: "Land deed",
+            docType: "title_deed",
+            driveUrl: "https://example.com/deed",
+          },
+        ],
+      },
+    });
+    assert.equal(createPoolRes.status, 201);
+
+    const listPools = await request(server.baseUrl, "/api/pools");
+    assert.equal(listPools.status, 200);
+    const legacyPool = listPools.payload.pools[0];
+
+    const contributeRes = await request(
+      server.baseUrl,
+      `/api/pools/${legacyPool.id}/contribute`,
+      {
+        method: "POST",
+        wallet: INVESTOR_WALLET,
+        body: { tokenAmount: 50 },
+      }
+    );
+    assert.equal(contributeRes.status, 201);
+
+    const acquisitionRes = await request(
+      server.baseUrl,
+      `/api/admin/pools/${legacyPool.id}/acquisition-doc`,
+      {
+        method: "POST",
+        wallet: ADMIN_WALLET,
+        body: {
+          name: "Acquisition deed",
+          driveUrl: "https://example.com/acquisition",
+        },
+      }
+    );
+    assert.equal(acquisitionRes.status, 201);
+
+    const offerRes = await request(
+      server.baseUrl,
+      `/api/admin/pools/${legacyPool.id}/compute-offer`,
+      {
+        method: "POST",
+        wallet: ADMIN_WALLET,
+        body: {
+          region: "Lombardia",
+          hardware: {
+            gpuModel: "RTX 4090",
+            gpuCount: 4,
+            ramGb: 256,
+            storageType: "NVMe",
+            storageTb: 20,
+          },
+          totalUnits: 10,
+          tokensPerUnitHour: 1,
+          documents: [],
+        },
+      }
+    );
+    assert.equal(offerRes.status, 201);
+    const offerId = offerRes.payload.computeOffer.id;
+
+    const rentRes = await request(server.baseUrl, "/api/compute/rent", {
+      method: "POST",
+      wallet: INVESTOR_WALLET,
+      body: {
+        offerId,
+        units: 2,
+        hours: 0.00001,
+      },
+    });
+    assert.equal(rentRes.status, 201);
+    assert.equal(rentRes.payload.availableUnits, 8);
+    assert.ok(rentRes.payload.rental.endAtMs > rentRes.payload.rental.startAtMs);
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const offersAfterExpiry = await request(server.baseUrl, "/api/compute/offers");
+    assert.equal(offersAfterExpiry.status, 200);
+    assert.equal(offersAfterExpiry.payload.offers[0].availableUnits, 10);
+
+    const walletSummary = await request(
+      server.baseUrl,
+      `/api/wallets/${INVESTOR_WALLET}/summary`
+    );
+    assert.equal(walletSummary.status, 200);
+    assert.equal(walletSummary.payload.rentals[0].status, "completed");
+    assert.ok(walletSummary.payload.rentals[0].completedAtMs);
   } finally {
     await server.close();
   }

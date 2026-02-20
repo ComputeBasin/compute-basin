@@ -2,6 +2,7 @@ import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import {
   ADMIN_WALLET,
+  MOCK_IOTA,
   REQUIRE_ONCHAIN_CONTRIBUTION,
   CONTRIBUTION_PRICE_NANOS,
   CONTRIBUTION_RECIPIENT_WALLET,
@@ -21,13 +22,16 @@ import {
 } from "../db.js";
 import { sha256Hex } from "../hash.js";
 import {
-  createNotarizationOnIota,
+  createSitePassportOnIota,
+  createBatchNotarizationOnIota,
+  getBackendSignerAddress,
   verifyIotaPaymentTx,
   sendIotaFromBackend,
 } from "../iotaClient.js";
 
 const router = Router();
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_POOL_FUNDING_DAYS = 30;
 
 function toLowerAddress(value) {
@@ -37,6 +41,19 @@ function toLowerAddress(value) {
 function toNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function nextSiteId(store) {
+  const existingIds = new Set((store.sites || []).map((site) => String(site.id || "")));
+  let index = (store.sites || []).length + 1;
+  while (index < 10000) {
+    const candidate = `SITE-${String(index).padStart(3, "0")}`;
+    if (!existingIds.has(candidate)) {
+      return candidate;
+    }
+    index += 1;
+  }
+  return `SITE-${randomUUID()}`;
 }
 
 function getRequestWallet(req) {
@@ -64,6 +81,135 @@ function requireAdminWallet(req) {
   }
 
   return wallet;
+}
+
+function assertLiveSignerMatchesAdmin() {
+  if (MOCK_IOTA) {
+    return;
+  }
+  const backendSigner = toLowerAddress(getBackendSignerAddress());
+  if (!backendSigner) {
+    const error = new Error(
+      "IOTA_SIGNER_SECRET_KEY is required for live notarization signer"
+    );
+    error.status = 500;
+    throw error;
+  }
+  if (backendSigner !== ADMIN_WALLET) {
+    const error = new Error(
+      `Live notarization signer ${backendSigner} must match ADMIN_WALLET ${ADMIN_WALLET}`
+    );
+    error.status = 500;
+    throw error;
+  }
+}
+
+function createHttpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function normalizeSha256Hash(rawHash, fieldName = "docHashSha256") {
+  if (typeof rawHash !== "string") {
+    throw createHttpError(400, `${fieldName} must be a SHA-256 hex string`);
+  }
+  const normalized = rawHash.trim().toLowerCase().replace(/^0x/, "");
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw createHttpError(
+      400,
+      `${fieldName} must be a 64-char SHA-256 hex string (optionally prefixed with 0x)`
+    );
+  }
+  return normalized;
+}
+
+function buildDocPayload(rawDoc, { defaultDocType = "", autoHashTypeLabel = "" } = {}) {
+  const name = typeof rawDoc?.name === "string" ? rawDoc.name.trim() : "";
+  const driveUrl = typeof rawDoc?.driveUrl === "string" ? rawDoc.driveUrl.trim() : "";
+  const docTypeRaw =
+    typeof rawDoc?.docType === "string" ? rawDoc.docType.trim() : defaultDocType;
+  const docType = docTypeRaw || defaultDocType;
+
+  if (!name || !driveUrl || !docType) {
+    throw createHttpError(400, "Each document requires name, docType and driveUrl");
+  }
+
+  const providedHash =
+    typeof rawDoc?.docHashSha256 === "string" ? rawDoc.docHashSha256.trim() : "";
+  const docHashSha256 = providedHash
+    ? normalizeSha256Hash(providedHash)
+    : sha256Hex(Buffer.from(`${name}|${autoHashTypeLabel || docType}|${driveUrl}`, "utf8"));
+
+  return {
+    name,
+    docType,
+    driveUrl,
+    docHashSha256,
+  };
+}
+
+function makeProofRecord({
+  poolId,
+  siteId,
+  document,
+  adminWallet,
+  notarizationResult,
+  proofIndex,
+}) {
+  const batchProof = notarizationResult.proofs[proofIndex] || null;
+  return {
+    id: `proof_${randomUUID()}`,
+    poolId,
+    siteId,
+    name: document.name,
+    docType: document.docType,
+    driveUrl: document.driveUrl,
+    docHashSha256: document.docHashSha256,
+    issuer: adminWallet,
+    timestampMs: batchProof?.timestampMs || notarizationResult.timestampMs,
+    iotaObjectId: batchProof?.objectId || null,
+    iotaTxDigest: notarizationResult.txDigest || null,
+    iotaSignedBy: notarizationResult.signedBy || null,
+    chainMode: notarizationResult.mode,
+    notarizationProvider: notarizationResult.provider || "passport",
+    batchIndex: proofIndex,
+  };
+}
+
+async function notarizePoolDocuments({
+  store,
+  pool,
+  site,
+  documents,
+  adminWallet,
+}) {
+  assertLiveSignerMatchesAdmin();
+  const notarizationResult = await createBatchNotarizationOnIota({
+    siteId: site.id,
+    siteObjectId: site.iotaSiteObjectId || null,
+    entries: documents.map((doc) => ({
+      docType: doc.docType,
+      fileHash: doc.docHashSha256,
+      fileName: doc.name,
+      timestampMs: Date.now(),
+    })),
+  });
+
+  const proofs = documents.map((document, proofIndex) => {
+    const proof = makeProofRecord({
+      poolId: pool.id,
+      siteId: site.id,
+      document,
+      adminWallet,
+      notarizationResult,
+      proofIndex,
+    });
+    store.proofs.push(proof);
+    return proof;
+  });
+
+  return { proofs, notarizationResult };
 }
 
 function buildPoolProgress(pool) {
@@ -170,6 +316,39 @@ function getContributionPaymentNanos(contribution) {
   return amountTokens * CONTRIBUTION_PRICE_NANOS;
 }
 
+function settleExpiredLegacyRentals(store, now = Date.now()) {
+  if (!Array.isArray(store.rentals) || store.rentals.length === 0) {
+    return false;
+  }
+  const offers = Array.isArray(store.computeOffers) ? store.computeOffers : [];
+  const offerById = new Map(offers.map((offer) => [offer.id, offer]));
+  let changed = false;
+
+  for (const rental of store.rentals) {
+    if (!rental || rental.status !== "active") {
+      continue;
+    }
+    const endAtMs = toNumber(rental.endAtMs);
+    if (endAtMs <= 0 || now < endAtMs) {
+      continue;
+    }
+
+    rental.status = "completed";
+    rental.completedAtMs = now;
+
+    const offer = offerById.get(rental.offerId);
+    if (offer) {
+      const units = Math.max(0, Math.trunc(toNumber(rental.units)));
+      const totalUnits = Math.max(0, Math.trunc(toNumber(offer.totalUnits)));
+      const availableUnits = Math.max(0, Math.trunc(toNumber(offer.availableUnits)));
+      offer.availableUnits = Math.min(totalUnits, availableUnits + units);
+    }
+    changed = true;
+  }
+
+  return changed;
+}
+
 function getPoolProofs(store, poolId) {
   return store.proofs.filter((proof) => proof.poolId === poolId);
 }
@@ -180,7 +359,9 @@ function toProofSummary(proof) {
     name: proof.name,
     docType: proof.docType,
     iotaTxDigest: proof.iotaTxDigest || null,
+    iotaSignedBy: proof.iotaSignedBy || null,
     chainMode: proof.chainMode || null,
+    notarizationProvider: proof.notarizationProvider || "passport",
     timestampMs: proof.timestampMs || null,
   };
 }
@@ -193,6 +374,109 @@ router.get("/sites", async (req, res, next) => {
   try {
     const store = await getStore(req);
     res.json({ sites: store.sites });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/admin/sites", async (req, res, next) => {
+  try {
+    requireAdminWallet(req);
+
+    const {
+      id,
+      name,
+      siteType,
+      areaM2,
+      targetKw,
+      approxLocation,
+      owner,
+      computeReady = true,
+      status = "seed",
+      tags = [],
+      mintOnIota = true,
+      iotaSiteObjectId,
+    } = req.body || {};
+
+    const normalizedName = typeof name === "string" ? name.trim() : "";
+    const normalizedSiteType = typeof siteType === "string" ? siteType.trim() : "";
+    const normalizedLocation =
+      typeof approxLocation === "string" ? approxLocation.trim() : "";
+    if (!normalizedName || !normalizedSiteType || !normalizedLocation) {
+      return res.status(400).json({
+        error: "name, siteType and approxLocation are required",
+      });
+    }
+
+    const area = Math.trunc(toNumber(areaM2));
+    const target = Math.trunc(toNumber(targetKw));
+    if (area <= 0) {
+      return res.status(400).json({ error: "areaM2 must be > 0" });
+    }
+    if (target < 0) {
+      return res.status(400).json({ error: "targetKw must be >= 0" });
+    }
+
+    const store = await getStore(req);
+    const requestedId =
+      typeof id === "string" && id.trim().length > 0
+        ? id.trim().toUpperCase()
+        : nextSiteId(store);
+    if (store.sites.some((site) => site.id === requestedId)) {
+      return res.status(409).json({
+        error: `Site id ${requestedId} already exists`,
+      });
+    }
+
+    let normalizedSiteObjectId =
+      typeof iotaSiteObjectId === "string" ? iotaSiteObjectId.trim() : "";
+    let siteMintResult = null;
+    if (!normalizedSiteObjectId) {
+      if (mintOnIota === false) {
+        return res.status(400).json({
+          error: "iotaSiteObjectId is required when mintOnIota=false",
+        });
+      }
+
+      assertLiveSignerMatchesAdmin();
+      siteMintResult = await createSitePassportOnIota({
+        siteCode: requestedId,
+        siteType: normalizedSiteType,
+        areaM2: area,
+        targetKw: target,
+        approxLocation: normalizedLocation,
+      });
+      normalizedSiteObjectId = siteMintResult.objectId || "";
+    }
+
+    const normalizedTags = Array.isArray(tags)
+      ? tags
+          .map((item) => (typeof item === "string" ? item.trim() : ""))
+          .filter(Boolean)
+      : [];
+
+    const site = {
+      id: requestedId,
+      name: normalizedName,
+      siteType: normalizedSiteType,
+      areaM2: area,
+      targetKw: target,
+      approxLocation: normalizedLocation,
+      owner: toLowerAddress(owner || ADMIN_WALLET),
+      computeReady: Boolean(computeReady),
+      status: typeof status === "string" && status.trim() ? status.trim() : "seed",
+      tags: normalizedTags,
+      iotaSiteObjectId: normalizedSiteObjectId || null,
+      iotaSiteTxDigest: siteMintResult?.txDigest || null,
+      iotaChainMode: siteMintResult?.mode || null,
+      iotaNotarizationProvider: siteMintResult?.provider || "passport",
+      createdAtMs: Date.now(),
+    };
+
+    store.sites.push(site);
+    await writeStore(store);
+
+    res.status(201).json({ site });
   } catch (error) {
     next(error);
   }
@@ -320,43 +604,19 @@ router.post("/admin/pools", async (req, res, next) => {
       computeOfferId: null,
     };
 
+    const docsPayload = documents.map((doc) =>
+      buildDocPayload(doc, {
+        autoHashTypeLabel: "PoolCreationDocument",
+      })
+    );
     store.pools.push(pool);
-
-    for (const doc of documents) {
-      if (!doc.name || !doc.docType || !doc.driveUrl) {
-        throw new Error("Each document requires name, docType, driveUrl");
-      }
-
-      const docHash =
-        doc.docHashSha256 && typeof doc.docHashSha256 === "string"
-          ? doc.docHashSha256
-          : sha256Hex(Buffer.from(`${doc.name}|${doc.docType}|${doc.driveUrl}`, "utf8"));
-
-      const iotaResult = await createNotarizationOnIota({
-        siteId: site.id,
-        siteObjectId: site.iotaSiteObjectId || null,
-        docType: doc.docType,
-        issuer: ADMIN_WALLET,
-        fileHash: docHash,
-        fileName: doc.name,
-        timestampMs: Date.now(),
-      });
-
-      store.proofs.push({
-        id: `proof_${randomUUID()}`,
-        poolId,
-        siteId: site.id,
-        name: doc.name,
-        docType: doc.docType,
-        driveUrl: doc.driveUrl,
-        docHashSha256: docHash,
-        issuer: ADMIN_WALLET,
-        timestampMs: iotaResult.timestampMs,
-        iotaObjectId: iotaResult.objectId,
-        iotaTxDigest: iotaResult.txDigest,
-        chainMode: iotaResult.mode,
-      });
-    }
+    await notarizePoolDocuments({
+      store,
+      pool,
+      site,
+      documents: docsPayload,
+      adminWallet: ADMIN_WALLET,
+    });
 
     await writeStore(store);
 
@@ -377,14 +637,34 @@ router.post("/pools/:poolId/contribute", async (req, res, next) => {
       return res.status(400).json({ error: "walletAddress is required" });
     }
 
-    const amount = Number(tokenAmount || 0);
+    let amount = Number(tokenAmount || 0);
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: "tokenAmount must be > 0" });
     }
-    if (REQUIRE_ONCHAIN_CONTRIBUTION && !Number.isInteger(amount)) {
-      return res.status(400).json({
-        error: "tokenAmount must be an integer when on-chain contribution is enabled",
-      });
+
+    if (REQUIRE_ONCHAIN_CONTRIBUTION) {
+      const tokenAmountAsString =
+        typeof tokenAmount === "string" ? tokenAmount.trim() : "";
+      let amountBigInt = null;
+
+      if (/^[0-9]+$/.test(tokenAmountAsString)) {
+        amountBigInt = BigInt(tokenAmountAsString);
+      } else if (typeof tokenAmount === "number" && Number.isSafeInteger(tokenAmount)) {
+        amountBigInt = BigInt(tokenAmount);
+      }
+
+      if (amountBigInt === null || amountBigInt <= 0n) {
+        return res.status(400).json({
+          error:
+            "tokenAmount must be a positive integer when on-chain contribution is enabled",
+        });
+      }
+      if (amountBigInt > BigInt(Number.MAX_SAFE_INTEGER)) {
+        return res.status(400).json({
+          error: `tokenAmount exceeds safe integer limit (${Number.MAX_SAFE_INTEGER})`,
+        });
+      }
+      amount = Number(amountBigInt);
     }
 
     const store = await getStore(req);
@@ -623,37 +903,29 @@ router.post("/admin/pools/:poolId/acquisition-doc", async (req, res, next) => {
       return res.status(400).json({ error: "Pool must be funded before adding acquisition deed" });
     }
 
-    const hash =
-      docHashSha256 && typeof docHashSha256 === "string"
-        ? docHashSha256
-        : sha256Hex(Buffer.from(`${name}|AcquisitionDeed|${driveUrl}`, "utf8"));
+    const [docPayload] = [
+      buildDocPayload(
+        {
+          name,
+          docType: "Acquisition Deed",
+          driveUrl,
+          docHashSha256,
+        },
+        {
+          autoHashTypeLabel: "AcquisitionDeed",
+        }
+      ),
+    ];
 
-    const iotaResult = await createNotarizationOnIota({
-      siteId: site.id,
-      siteObjectId: site.iotaSiteObjectId || null,
-      docType: "Acquisition Deed",
-      issuer: ADMIN_WALLET,
-      fileHash: hash,
-      fileName: name,
-      timestampMs: Date.now(),
+    const { proofs } = await notarizePoolDocuments({
+      store,
+      pool,
+      site,
+      documents: [docPayload],
+      adminWallet: ADMIN_WALLET,
     });
+    const proof = proofs[0];
 
-    const proof = {
-      id: `proof_${randomUUID()}`,
-      poolId: pool.id,
-      siteId: site.id,
-      name,
-      docType: "Acquisition Deed",
-      driveUrl,
-      docHashSha256: hash,
-      issuer: ADMIN_WALLET,
-      timestampMs: iotaResult.timestampMs,
-      iotaObjectId: iotaResult.objectId,
-      iotaTxDigest: iotaResult.txDigest,
-      chainMode: iotaResult.mode,
-    };
-
-    store.proofs.push(proof);
     pool.acquisitionProofId = proof.id;
     if (pool.status === "funded") {
       pool.status = "acquired";
@@ -665,6 +937,64 @@ router.post("/admin/pools/:poolId/acquisition-doc", async (req, res, next) => {
     res.status(201).json({
       pool: buildPoolProgress(pool),
       proof,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/admin/pools/:poolId/documents/finalize", async (req, res, next) => {
+  try {
+    requireAdminWallet(req);
+    const { documents } = req.body || {};
+    if (!Array.isArray(documents) || documents.length === 0) {
+      return res.status(400).json({ error: "documents array is required" });
+    }
+
+    const docsPayload = documents.map((doc) =>
+      buildDocPayload(doc, {
+        autoHashTypeLabel: "PoolFinalizeDocument",
+      })
+    );
+    const store = await getStore(req);
+    const pool = getPoolOrThrow(store, req.params.poolId);
+    const site = getSiteOrThrow(store, pool.siteId);
+    const statusChangedByDeadline = syncPoolFundingState(pool, Date.now());
+
+    if (
+      pool.status !== "open" &&
+      pool.status !== "funded" &&
+      pool.status !== "acquired" &&
+      pool.status !== "operational"
+    ) {
+      if (statusChangedByDeadline) {
+        await writeStore(store);
+      }
+      return res.status(400).json({
+        error:
+          "Pool must be open/funded/acquired/operational to finalize additional documents",
+      });
+    }
+
+    const { proofs, notarizationResult } = await notarizePoolDocuments({
+      store,
+      pool,
+      site,
+      documents: docsPayload,
+      adminWallet: ADMIN_WALLET,
+    });
+    await writeStore(store);
+
+    res.status(201).json({
+      pool: buildPoolProgress(pool),
+      proofs,
+      notarization: {
+        txDigest: notarizationResult.txDigest || null,
+        chainMode: notarizationResult.mode,
+        provider: notarizationResult.provider || "passport",
+        signedBy: notarizationResult.signedBy || null,
+        proofCount: proofs.length,
+      },
     });
   } catch (error) {
     next(error);
@@ -699,6 +1029,49 @@ router.post("/admin/pools/:poolId/compute-offer", async (req, res, next) => {
       });
     }
 
+    const docsPayload = Array.isArray(documents)
+      ? documents
+          .map((rawDoc) => {
+            const hasAnyField =
+              typeof rawDoc?.name === "string" ||
+              typeof rawDoc?.driveUrl === "string" ||
+              typeof rawDoc?.docHashSha256 === "string";
+            if (!hasAnyField) {
+              return null;
+            }
+            return buildDocPayload(
+              {
+                ...rawDoc,
+                docType:
+                  typeof rawDoc?.docType === "string" && rawDoc.docType.trim()
+                    ? rawDoc.docType
+                    : "Compute Offer Document",
+              },
+              {
+                defaultDocType: "Compute Offer Document",
+                autoHashTypeLabel: "ComputeOfferDocument",
+              }
+            );
+          })
+          .filter(Boolean)
+      : [];
+
+    let notarizedDocs = [];
+    if (docsPayload.length > 0) {
+      const { proofs } = await notarizePoolDocuments({
+        store,
+        pool,
+        site,
+        documents: docsPayload,
+        adminWallet: ADMIN_WALLET,
+      });
+      notarizedDocs = proofs.map((proof) => ({
+        id: proof.id,
+        name: proof.name,
+        driveUrl: proof.driveUrl,
+      }));
+    }
+
     const existing = store.computeOffers.find((item) => item.poolId === pool.id);
     const offerId = existing?.id || `offer_${randomUUID()}`;
 
@@ -711,7 +1084,7 @@ router.post("/admin/pools/:poolId/compute-offer", async (req, res, next) => {
       totalUnits: units,
       availableUnits: existing ? Math.min(existing.availableUnits, units) : units,
       tokensPerUnitHour: price,
-      docs: Array.isArray(documents) ? documents : [],
+      docs: docsPayload.length > 0 ? notarizedDocs : existing?.docs || [],
       status: "active",
       updatedAtMs: Date.now(),
     };
@@ -742,6 +1115,9 @@ router.get("/compute/offers", async (req, res, next) => {
   try {
     const location = typeof req.query.location === "string" ? req.query.location : "";
     const store = await getStore(req);
+    if (settleExpiredLegacyRentals(store, Date.now())) {
+      await writeStore(store);
+    }
 
     const offers = store.computeOffers
       .filter((offer) => offer.status === "active")
@@ -749,12 +1125,24 @@ router.get("/compute/offers", async (req, res, next) => {
         const pool = store.pools.find((item) => item.id === offer.poolId) || null;
         const site = store.sites.find((item) => item.id === offer.siteId) || null;
         const proofs = getPoolProofs(store, offer.poolId);
+        const mergedDocs = [...(offer.docs || []), ...proofs];
+        const seenDocIds = new Set();
+        const docs = [];
+        for (const item of mergedDocs) {
+          if (item && typeof item === "object" && typeof item.id === "string") {
+            if (seenDocIds.has(item.id)) {
+              continue;
+            }
+            seenDocIds.add(item.id);
+          }
+          docs.push(item);
+        }
 
         return {
           ...offer,
           pool: pool ? buildPoolProgress(pool) : null,
           site,
-          docs: [...offer.docs, ...proofs],
+          docs,
         };
       })
       .filter((offer) =>
@@ -789,6 +1177,9 @@ router.post("/compute/rent", async (req, res, next) => {
     }
 
     const store = await getStore(req);
+    if (settleExpiredLegacyRentals(store, Date.now())) {
+      await writeStore(store);
+    }
     const offer = store.computeOffers.find((item) => item.id === offerId);
     if (!offer) {
       return res.status(404).json({ error: "Compute offer not found" });
@@ -805,6 +1196,8 @@ router.post("/compute/rent", async (req, res, next) => {
 
     debitWallet(store, walletAddress, totalCost);
     offer.availableUnits -= unitsNum;
+    const startedAtMs = Date.now();
+    const endAtMs = startedAtMs + Math.trunc(hoursNum * HOUR_MS);
 
     const rental = {
       id: `rent_${randomUUID()}`,
@@ -816,7 +1209,9 @@ router.post("/compute/rent", async (req, res, next) => {
       hours: hoursNum,
       totalCostTokens: totalCost,
       status: "active",
-      timestampMs: Date.now(),
+      timestampMs: startedAtMs,
+      startAtMs: startedAtMs,
+      endAtMs,
     };
 
     store.rentals.push(rental);
@@ -836,6 +1231,9 @@ router.get("/wallets/:walletAddress/summary", async (req, res, next) => {
   try {
     const walletAddress = toLowerAddress(req.params.walletAddress);
     const store = await getStore(req);
+    if (settleExpiredLegacyRentals(store, Date.now())) {
+      await writeStore(store);
+    }
 
     const contributions = store.contributions.filter(
       (item) => item.walletAddress === walletAddress
@@ -862,6 +1260,33 @@ router.get("/proofs/:proofId", async (req, res, next) => {
       return res.status(404).json({ error: "Proof not found" });
     }
     res.json({ proof });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/proofs/:proofId/verify-hash", async (req, res, next) => {
+  try {
+    const providedHash = normalizeSha256Hash(req.body?.docHashSha256);
+
+    const store = await getStore(req);
+    const proof = store.proofs.find((item) => item.id === req.params.proofId);
+    if (!proof) {
+      return res.status(404).json({ error: "Proof not found" });
+    }
+
+    const normalizedExpectedNoPrefix = normalizeSha256Hash(proof.docHashSha256);
+    const normalizedProvided = providedHash;
+
+    res.json({
+      proofId: proof.id,
+      expectedHash: normalizedExpectedNoPrefix,
+      providedHash: normalizedProvided,
+      hashAlgorithm: "sha256",
+      match: normalizedExpectedNoPrefix === normalizedProvided,
+      chainMode: proof.chainMode || null,
+      iotaTxDigest: proof.iotaTxDigest || null,
+    });
   } catch (error) {
     next(error);
   }
