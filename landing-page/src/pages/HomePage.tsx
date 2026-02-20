@@ -1,29 +1,34 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useCurrentAccount } from "@iota/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@iota/dapp-kit";
+import { Transaction } from "@iota/iota-sdk/transactions";
 import {
   contributeToPool,
   getComputeOffers,
+  getMeta,
   getPools,
+  refundPoolContribution,
   getWalletSummary,
   rentCompute,
 } from "../services/api";
-import type { ComputeOffer, PoolSummary, WalletSummary } from "../types/domain";
+import type { ComputeOffer, Meta, PoolSummary, WalletSummary } from "../types/domain";
 
 type TabKey = "pools" | "compute";
 
 export function HomePage() {
   const account = useCurrentAccount();
+  const { mutateAsync: signAndExecuteTransaction } = useSignAndExecuteTransaction();
   const wallet = account?.address?.toLowerCase() || "";
 
   const [activeTab, setActiveTab] = useState<TabKey>("pools");
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [pools, setPools] = useState<PoolSummary[]>([]);
   const [offers, setOffers] = useState<ComputeOffer[]>([]);
   const [walletSummary, setWalletSummary] = useState<WalletSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [contributionInputs, setContributionInputs] = useState<Record<string, number>>({});
+  const [contributionInputs, setContributionInputs] = useState<Record<string, string>>({});
   const [renting, setRenting] = useState<{ offerId: string; units: number; hours: number }>({
     offerId: "",
     units: 1,
@@ -41,12 +46,46 @@ export function HomePage() {
     }
     return offers.filter((offer) => offer.region === selectedLocation);
   }, [offers, selectedLocation]);
+  const poolTitleById = useMemo(
+    () => new Map(pools.map((pool) => [pool.id, pool.title])),
+    [pools]
+  );
+  const recentContributions = useMemo(() => {
+    if (!walletSummary?.contributions) {
+      return [];
+    }
+    return [...walletSummary.contributions]
+      .sort((a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0))
+      .slice(0, 6);
+  }, [walletSummary?.contributions]);
+  const onChainContributionRequired = Boolean(meta?.onChainContributionRequired);
+  const escrowEnabledGlobally = Boolean(meta?.useIotaEscrow);
+  const activeNetwork = meta?.iotaActiveNetwork || "testnet";
+  const runtimeMockMode = meta?.iotaMode === "mock" || activeNetwork === "mock";
+  const networkLabel =
+    activeNetwork === "mainnet"
+      ? "Mainnet"
+      : activeNetwork === "localnet"
+        ? "Localnet"
+        : activeNetwork === "mock"
+          ? "Mock (simulated tx)"
+        : "Testnet";
+
+  function isEscrowEnabledForPool(pool: PoolSummary | null | undefined) {
+    const packageId = pool?.iotaEscrowPackageId || meta?.iotaEscrowPackageId;
+    return Boolean(escrowEnabledGlobally && pool?.iotaEscrowObjectId && packageId);
+  }
 
   async function load() {
     setLoading(true);
     setError(null);
     try {
-      const [poolData, offerData] = await Promise.all([getPools(), getComputeOffers()]);
+      const [metaData, poolData, offerData] = await Promise.all([
+        getMeta(),
+        getPools(),
+        getComputeOffers(),
+      ]);
+      setMeta(metaData);
       setPools(poolData);
       setOffers(offerData);
       if (wallet) {
@@ -72,32 +111,98 @@ export function HomePage() {
       return;
     }
 
-    const amount = Number(contributionInputs[poolId] || 0);
-    if (amount <= 0) {
-      setError("Token amount must be > 0");
+    const rawAmount = (contributionInputs[poolId] || "").trim();
+    if (!/^[0-9]+$/.test(rawAmount)) {
+      setError("Token amount must be a positive integer");
       return;
     }
 
+    const parsedAmount = BigInt(rawAmount);
+    if (parsedAmount <= 0n) {
+      setError("Token amount must be > 0");
+      return;
+    }
+    if (parsedAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      setError(`Token amount exceeds safe limit (${Number.MAX_SAFE_INTEGER})`);
+      return;
+    }
+    const amount = Number(parsedAmount);
+    const targetPool = pools.find((item) => item.id === poolId) || null;
+    const escrowEnabledForPool = isEscrowEnabledForPool(targetPool);
+
+    let paymentTxDigest: string | undefined;
     try {
       setError(null);
+      if (onChainContributionRequired) {
+        const rawPriceNanoIota = meta?.contributionPriceNanoIota || "0";
+        if (!/^[0-9]+$/.test(rawPriceNanoIota)) {
+          throw new Error("Backend contribution price configuration is invalid");
+        }
+        const priceNanoIota = BigInt(rawPriceNanoIota);
+        if (!escrowEnabledGlobally) {
+          throw new Error(
+            "On-chain contribution requires escrow mode, but backend metadata says escrow is disabled."
+          );
+        }
+        if (priceNanoIota <= 0n) {
+          throw new Error("Backend contribution payment policy is not configured");
+        }
+        if (!escrowEnabledForPool) {
+          throw new Error(
+            "This pool is not escrow-enabled. Ask admin to recreate/migrate it before contributing."
+          );
+        }
+        if (!runtimeMockMode) {
+          const totalPaymentNanoIota = parsedAmount * priceNanoIota;
+          const tx = new Transaction();
+          const [paymentCoin] = tx.splitCoins(tx.gas, [totalPaymentNanoIota]);
+          const escrowPackageId = targetPool?.iotaEscrowPackageId || meta?.iotaEscrowPackageId || "";
+          const escrowObjectId = targetPool?.iotaEscrowObjectId || "";
+          if (!escrowPackageId || !escrowObjectId) {
+            throw new Error(
+              "Escrow mode is enabled but pool escrow object/package is missing. Ask admin to recreate pool with escrow."
+            );
+          }
+          tx.moveCall({
+            target: `${escrowPackageId}::pool_escrow::contribute`,
+            arguments: [tx.object(escrowObjectId), paymentCoin, tx.object("0x6")],
+          });
+
+          const txResult = await signAndExecuteTransaction({
+            transaction: tx,
+            waitForTransaction: true,
+          });
+          paymentTxDigest = txResult.digest;
+        }
+      }
+
       await contributeToPool({
         walletAddress: wallet,
         poolId,
         tokenAmount: amount,
+        paymentTxDigest,
       });
-      setContributionInputs((prev) => ({ ...prev, [poolId]: 0 }));
+      setContributionInputs((prev) => ({ ...prev, [poolId]: "" }));
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Contribution failed");
+      const message = err instanceof Error ? err.message : "Contribution failed";
+      if (paymentTxDigest) {
+        setError(
+          `IOTA payment was sent (${shortDigest(paymentTxDigest)}), but backend contribution recording failed: ${message}`
+        );
+      } else {
+        setError(message);
+      }
     }
   }
 
-  async function handleRent() {
+  async function handleRent(offerIdOverride?: string) {
     if (!wallet) {
       setError("Connect wallet to rent compute");
       return;
     }
-    if (!renting.offerId) {
+    const selectedOfferId = offerIdOverride || renting.offerId;
+    if (!selectedOfferId) {
       setError("Select a compute offer");
       return;
     }
@@ -106,14 +211,138 @@ export function HomePage() {
       setError(null);
       await rentCompute({
         walletAddress: wallet,
-        offerId: renting.offerId,
+        offerId: selectedOfferId,
         units: Number(renting.units),
         hours: Number(renting.hours),
       });
+      setRenting((prev) => ({ ...prev, offerId: selectedOfferId }));
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Rental failed");
     }
+  }
+
+  async function handleRefund(poolId: string) {
+    if (!wallet) {
+      setError("Connect wallet to request refund");
+      return;
+    }
+
+    try {
+      setError(null);
+      let refundTxDigest: string | undefined;
+      const targetPool = pools.find((item) => item.id === poolId) || null;
+      if (onChainContributionRequired && !isEscrowEnabledForPool(targetPool)) {
+        throw new Error(
+          "Pool refund must be executed from escrow, but this pool has no escrow metadata."
+        );
+      }
+      if (onChainContributionRequired && isEscrowEnabledForPool(targetPool)) {
+        if (!runtimeMockMode) {
+          const escrowPackageId =
+            targetPool?.iotaEscrowPackageId || meta?.iotaEscrowPackageId || "";
+          const escrowObjectId = targetPool?.iotaEscrowObjectId || "";
+          const refundableContribution = (walletSummary?.contributions || [])
+            .filter(
+              (item) =>
+                item.poolId === poolId &&
+                !item.refundedAtMs &&
+                !item.tokensReleasedAtMs &&
+                Boolean(item.escrowReceiptObjectId)
+            )
+            .sort((a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0))[0];
+          if (!refundableContribution?.escrowReceiptObjectId) {
+            throw new Error(
+              "No escrow receipt found for this pool on current wallet. Cannot submit on-chain refund."
+            );
+          }
+          if (!escrowPackageId || !escrowObjectId) {
+            throw new Error("Escrow package/object is missing on backend metadata");
+          }
+
+          const tx = new Transaction();
+          tx.moveCall({
+            target: `${escrowPackageId}::pool_escrow::refund`,
+            arguments: [
+              tx.object(escrowObjectId),
+              tx.object(refundableContribution.escrowReceiptObjectId),
+              tx.object("0x6"),
+            ],
+          });
+          const txResult = await signAndExecuteTransaction({
+            transaction: tx,
+            waitForTransaction: true,
+          });
+          refundTxDigest = txResult.digest;
+        }
+      }
+
+      await refundPoolContribution({
+        walletAddress: wallet,
+        poolId,
+        refundTxDigest,
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Refund failed");
+    }
+  }
+
+  function shortDigest(value?: string | null) {
+    if (!value) return "n/a";
+    return `${value.slice(0, 10)}...${value.slice(-8)}`;
+  }
+
+  function formatDate(value?: number | null) {
+    if (!value || !Number.isFinite(value)) return "n/a";
+    return new Date(value).toLocaleString();
+  }
+
+  function txExplorerUrl(txDigest?: string | null) {
+    if (!txDigest) return null;
+    if (runtimeMockMode || activeNetwork === "localnet") {
+      return null;
+    }
+    const network = activeNetwork === "mainnet" ? "mainnet" : "testnet";
+    return `https://explorer.iota.org/transaction/${txDigest}?network=${network}`;
+  }
+
+  function formatNanoIotaToIota(nanoIota: bigint, maxDecimals = 6) {
+    const base = 1_000_000_000n;
+    const whole = nanoIota / base;
+    const remainder = nanoIota % base;
+    if (remainder === 0n) {
+      return whole.toString();
+    }
+    const decimals = Math.max(0, Math.min(9, maxDecimals));
+    const scaled = (remainder * 10n ** BigInt(decimals)) / base;
+    const fraction = scaled.toString().padStart(decimals, "0").replace(/0+$/, "");
+    return fraction ? `${whole.toString()}.${fraction}` : whole.toString();
+  }
+
+  function getContributionPreview(poolId: string) {
+    const rawAmount = (contributionInputs[poolId] || "").trim();
+    if (!/^[0-9]+$/.test(rawAmount)) {
+      return null;
+    }
+    const tokenAmount = BigInt(rawAmount);
+    if (tokenAmount <= 0n) {
+      return null;
+    }
+    const rawPriceNano = meta?.contributionPriceNanoIota || "0";
+    if (!/^[0-9]+$/.test(rawPriceNano)) {
+      return null;
+    }
+    const priceNano = BigInt(rawPriceNano);
+    if (priceNano <= 0n) {
+      return null;
+    }
+    const totalNano = tokenAmount * priceNano;
+    return {
+      tokenAmount: tokenAmount.toString(),
+      totalNano: totalNano.toString(),
+      totalIota: formatNanoIotaToIota(totalNano, 9),
+    };
   }
 
   return (
@@ -129,10 +358,55 @@ export function HomePage() {
           A single participant wallet flow: buy tokens by joining pools, then spend the same tokens
           to rent compute from active sites.
         </p>
+        <p className="mt-2 inline-flex rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-xs text-slate-200">
+          Network: {networkLabel}
+        </p>
+        {onChainContributionRequired ? (
+          <p className="mt-2 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-xs text-emerald-100">
+            {runtimeMockMode
+              ? `Mock mode (${meta?.iotaMode || "unknown"}, ${networkLabel}): contributions simulate pool escrow deposits at `
+              : `On-chain mode (${meta?.iotaMode || "unknown"}, ${networkLabel}): each contribution triggers a pool escrow smart-contract deposit at `}
+            {meta?.contributionPriceNanoIota || "0"} nanoIOTA per token.
+            Tokens stay locked
+            until pool is funded; if deadline fails, refund is enabled.
+            {meta?.tokensPerIota && meta?.iotaPerToken && (
+              <> Exchange rate: 1 IOTA = {meta.tokensPerIota} SFC ({meta.iotaPerToken} IOTA/SFC).</>
+            )}
+            {meta?.useIotaEscrow && meta?.iotaEscrowPackageId && (
+              <> Escrow package: {meta.iotaEscrowPackageId}.</>
+            )}
+            {meta?.notarizationProvider && (
+              <> Notarization provider: {meta.notarizationProvider}.</>
+            )}
+            {runtimeMockMode && (
+              <> Notarization and escrow digests are synthetic in mock mode and not visible on explorer.</>
+            )}
+          </p>
+        ) : (
+          <p className="mt-2 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
+            Demo mode: pool contributions update platform balances off-chain. Your wallet IOTA
+            balance is not debited yet.
+          </p>
+        )}
+        {onChainContributionRequired && !escrowEnabledGlobally && (
+          <p className="mt-2 rounded-lg border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-200">
+            On-chain mode requires escrow metadata (`useIotaEscrow=true`) from backend.
+            Contributions are disabled until configuration is fixed for {networkLabel}.
+          </p>
+        )}
+
+        {meta?.notarizationSignerMatchesAdmin === false && (
+          <p className="mt-2 rounded-lg border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-200">
+            Warning: live notarization signer does not match admin wallet. Fix backend signer configuration.
+          </p>
+        )}
 
         <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
           <span className="rounded-full border border-cyan-300/30 bg-cyan-400/10 px-3 py-1 text-cyan-100">
             Token balance: {walletSummary?.tokenBalance ?? 0} SFC
+          </span>
+          <span className="rounded-full border border-amber-300/30 bg-amber-300/10 px-3 py-1 text-amber-100">
+            Locked: {walletSummary?.lockedTokenBalance ?? 0} SFC
           </span>
           <span className="rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-slate-300">
             Contributions: {walletSummary?.contributions.length ?? 0}
@@ -178,10 +452,83 @@ export function HomePage() {
         </p>
       )}
 
+      {walletSummary && recentContributions.length > 0 && (
+        <div className="surface p-5">
+          <h3 className="text-base font-semibold text-white">Recent contribution activity</h3>
+          <div className="mt-3 grid gap-2">
+            {recentContributions.map((item) => {
+              const paymentUrl = txExplorerUrl(item.paymentTxDigest);
+              const refundUrl = txExplorerUrl(item.refundTxDigest);
+              const settlementLabel = item.refundedAtMs
+                ? "refunded"
+                : item.tokensReleasedAtMs
+                  ? "released"
+                  : item.tokenSettlementMode === "locked"
+                    ? "locked"
+                    : "liquid";
+
+              return (
+                <div
+                  key={item.id}
+                  className="rounded-lg border border-white/10 bg-slate-900/70 px-3 py-2 text-xs"
+                >
+                  <p className="text-slate-200">
+                    {poolTitleById.get(item.poolId) || item.poolId} • {item.tokenAmount} SFC •{" "}
+                    {settlementLabel}
+                  </p>
+                  <p className="mt-0.5 text-slate-400">{formatDate(item.timestampMs)}</p>
+                  {item.paymentTxDigest && (
+                    <p className="mt-1 text-slate-300">
+                      Payment tx:{" "}
+                      {paymentUrl ? (
+                        <a
+                          href={paymentUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-cyan-200 hover:text-cyan-100"
+                        >
+                          {shortDigest(item.paymentTxDigest)}
+                        </a>
+                      ) : (
+                        shortDigest(item.paymentTxDigest)
+                      )}
+                    </p>
+                  )}
+                  {item.escrowReceiptObjectId && (
+                    <p className="mt-1 text-slate-300">
+                      Escrow receipt: {shortDigest(item.escrowReceiptObjectId)}
+                    </p>
+                  )}
+                  {item.refundTxDigest && (
+                    <p className="mt-1 text-amber-200">
+                      Refund tx:{" "}
+                      {refundUrl ? (
+                        <a
+                          href={refundUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-amber-100 hover:text-amber-50"
+                        >
+                          {shortDigest(item.refundTxDigest)}
+                        </a>
+                      ) : (
+                        shortDigest(item.refundTxDigest)
+                      )}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {activeTab === "pools" && (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {pools.map((pool) => (
-            <article key={pool.id} className="surface p-5">
+          {pools.map((pool) => {
+            const contributionPreview = getContributionPreview(pool.id);
+            return (
+              <article key={pool.id} className="surface p-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-lg font-semibold text-white">{pool.title}</h3>
                 <span className="rounded-full border border-white/10 bg-slate-900 px-2 py-1 text-xs text-slate-300">
@@ -191,6 +538,9 @@ export function HomePage() {
 
               <p className="mt-1 text-sm text-slate-300">{pool.location} • {pool.site?.name}</p>
               <p className="mt-2 text-sm text-slate-400">{pool.description || "No description"}</p>
+              <p className="mt-2 text-xs text-slate-400">
+                Funding deadline: {formatDate(pool.fundingDeadlineMs)}
+              </p>
 
               <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
                 <div className="rounded-lg border border-white/10 bg-slate-900/70 p-2">
@@ -237,30 +587,77 @@ export function HomePage() {
                 )}
               </div>
 
+              {pool.proofs && pool.proofs.length > 0 && (
+                <div className="mt-3 grid gap-2">
+                  {pool.proofs.slice(0, 3).map((proof) => (
+                    <Link
+                      key={proof.id}
+                      to={`/proofs/${proof.id}`}
+                      className="rounded-lg border border-white/10 bg-slate-900/70 px-3 py-2 text-xs text-slate-200 hover:border-cyan-300/30"
+                    >
+                      <p className="font-semibold text-cyan-100">{proof.name}</p>
+                      <p className="mt-0.5 text-slate-400">
+                        {proof.docType} • tx {shortDigest(proof.iotaTxDigest)}
+                      </p>
+                    </Link>
+                  ))}
+                </div>
+              )}
+
               <div className="mt-4 flex flex-wrap gap-2">
                 <input
-                  type="number"
-                  min={1}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
                   className="w-32 rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-sm"
                   placeholder="Tokens"
                   value={contributionInputs[pool.id] || ""}
                   onChange={(event) =>
                     setContributionInputs((prev) => ({
                       ...prev,
-                      [pool.id]: Number(event.target.value),
+                      [pool.id]: event.target.value,
                     }))
                   }
                 />
                 <button
                   className="rounded-lg bg-gradient-to-r from-cyan-300 to-emerald-300 px-4 py-2 text-sm font-semibold text-slate-900"
                   onClick={() => handleContribute(pool.id)}
-                  disabled={pool.status !== "open"}
+                  disabled={
+                    pool.status !== "open" ||
+                    (onChainContributionRequired && !isEscrowEnabledForPool(pool))
+                  }
                 >
-                  Buy pool tokens
+                  {onChainContributionRequired
+                    ? runtimeMockMode
+                      ? "Contribute (mock escrow)"
+                      : "Contribute (on-chain escrow)"
+                    : "Contribute (demo ledger)"}
                 </button>
+                {pool.status === "failed" && (
+                  <button
+                    className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-4 py-2 text-sm font-semibold text-amber-100"
+                    onClick={() => handleRefund(pool.id)}
+                    disabled={onChainContributionRequired && !isEscrowEnabledForPool(pool)}
+                  >
+                    {onChainContributionRequired
+                      ? isEscrowEnabledForPool(pool)
+                        ? runtimeMockMode
+                          ? "Claim refund (mock escrow)"
+                          : "Claim refund (on-chain)"
+                        : "Refund unavailable (migrate pool)"
+                      : "Withdraw / Refund"}
+                  </button>
+                )}
               </div>
-            </article>
-          ))}
+              {onChainContributionRequired && contributionPreview && (
+                <p className="mt-2 text-xs text-emerald-200">
+                  {runtimeMockMode ? "Escrow equivalent (simulated): " : "Wallet signature amount: "}
+                  {contributionPreview.totalIota} IOTA ({contributionPreview.totalNano} nanoIOTA)
+                </p>
+              )}
+              </article>
+            );
+          })}
         </div>
       )}
 
@@ -386,8 +783,7 @@ export function HomePage() {
                     <button
                       className="rounded-lg bg-gradient-to-r from-cyan-300 to-emerald-300 px-4 py-2 text-sm font-semibold text-slate-900"
                       onClick={() => {
-                        setRenting((prev) => ({ ...prev, offerId: offer.id }));
-                        handleRent();
+                        handleRent(offer.id);
                       }}
                       disabled={offer.availableUnits <= 0}
                     >

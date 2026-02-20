@@ -1,0 +1,60 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-artifacts:
+    name: Package Build Artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            landing-page/package-lock.json
+
+      - name: Backend install
+        working-directory: backend
+        run: |
+          npm ci
+
+      - name: Frontend install + build
+        working-directory: landing-page
+        run: |
+          npm ci
+          npm run build
+
+      - name: Archive backend package
+        run: tar -czf backend-artifact.tgz backend
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-artifact
+          path: backend-artifact.tgz
+          retention-days: 14
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: landing-page/dist
+          retention-days: 14

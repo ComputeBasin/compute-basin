@@ -1,14 +1,17 @@
-import { useEffect, useState } from "react";
-import { useCurrentAccount } from "@iota/dapp-kit";
+import { useEffect, useMemo, useState } from "react";
+import { useCurrentAccount, useIotaClientContext } from "@iota/dapp-kit";
 import {
   addAcquisitionDoc,
   createPool,
+  createSite,
+  finalizePoolDocuments,
   getMeta,
   getPools,
   getSites,
+  setAdminIotaNetwork,
   upsertComputeOffer,
 } from "../services/api";
-import type { PoolSummary, Site } from "../types/domain";
+import type { IotaNetwork, Meta, PoolSummary, Site } from "../types/domain";
 
 function emptyDoc() {
   return {
@@ -19,15 +22,40 @@ function emptyDoc() {
   };
 }
 
+function toWalletNetwork(network: IotaNetwork): "localnet" | "testnet" | "mainnet" {
+  if (network === "localnet" || network === "mainnet") {
+    return network;
+  }
+  return "testnet";
+}
+
 export function AdminPage() {
   const account = useCurrentAccount();
+  const { network: walletNetwork, selectNetwork } = useIotaClientContext();
   const wallet = account?.address?.toLowerCase() || "";
 
   const [adminWallet, setAdminWallet] = useState<string>("");
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [sites, setSites] = useState<Site[]>([]);
   const [pools, setPools] = useState<PoolSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [selectedNetwork, setSelectedNetwork] = useState<IotaNetwork>("testnet");
+  const [switchingNetwork, setSwitchingNetwork] = useState(false);
+
+  const [siteForm, setSiteForm] = useState({
+    id: "",
+    name: "",
+    siteType: "Land",
+    areaM2: 1000,
+    targetKw: 100,
+    approxLocation: "",
+    owner: "",
+    status: "seed",
+    tagsText: "",
+    mintOnIota: true,
+    iotaSiteObjectId: "",
+  });
 
   const [poolForm, setPoolForm] = useState({
     siteId: "",
@@ -36,6 +64,7 @@ export function AdminPage() {
     location: "",
     landValueTokens: 0,
     surplusTokens: 0,
+    fundingDurationDays: 30,
   });
   const [docs, setDocs] = useState([emptyDoc()]);
 
@@ -44,6 +73,11 @@ export function AdminPage() {
     name: "",
     driveUrl: "",
     docHashSha256: "",
+  });
+
+  const [finalizeDocsForm, setFinalizeDocsForm] = useState({
+    poolId: "",
+    docsText: "",
   });
 
   const [computeForm, setComputeForm] = useState({
@@ -61,10 +95,36 @@ export function AdminPage() {
   });
 
   const isAdmin = wallet && adminWallet && wallet === adminWallet;
+  const acquisitionEligiblePools = useMemo(
+    () =>
+      pools.filter((pool) =>
+        pool.status === "funded" || pool.status === "acquired" || pool.status === "operational"
+      ),
+    [pools]
+  );
+  const computeEligiblePools = useMemo(
+    () => pools.filter((pool) => pool.status === "acquired" || pool.status === "operational"),
+    [pools]
+  );
+  const finalizeEligiblePools = useMemo(
+    () =>
+      pools.filter(
+        (pool) =>
+          pool.status === "open" ||
+          pool.status === "funded" ||
+          pool.status === "acquired" ||
+          pool.status === "operational"
+      ),
+    [pools]
+  );
 
   async function load() {
     try {
       const [meta, siteData, poolData] = await Promise.all([getMeta(), getSites(), getPools()]);
+      setMeta(meta);
+      if (meta.iotaActiveNetwork) {
+        setSelectedNetwork(meta.iotaActiveNetwork);
+      }
       setAdminWallet((meta.adminWallet || "").toLowerCase());
       setSites(siteData);
       setPools(poolData);
@@ -77,6 +137,145 @@ export function AdminPage() {
     load();
   }, []);
 
+  useEffect(() => {
+    if (acquisitionEligiblePools.length === 0) {
+      return;
+    }
+    const firstPoolId = acquisitionEligiblePools[0]?.id || "";
+    if (!firstPoolId) {
+      return;
+    }
+
+    setAcquisitionForm((prev) => {
+      if (prev.poolId) {
+        return prev;
+      }
+      return { ...prev, poolId: firstPoolId };
+    });
+
+  }, [acquisitionEligiblePools]);
+
+  useEffect(() => {
+    if (finalizeEligiblePools.length === 0) {
+      return;
+    }
+    const firstPoolId = finalizeEligiblePools[0]?.id || "";
+    if (!firstPoolId) {
+      return;
+    }
+
+    setFinalizeDocsForm((prev) => {
+      if (prev.poolId) {
+        return prev;
+      }
+      return { ...prev, poolId: firstPoolId };
+    });
+  }, [finalizeEligiblePools]);
+
+  useEffect(() => {
+    if (computeEligiblePools.length === 0) {
+      return;
+    }
+    const firstPoolId = computeEligiblePools[0]?.id || "";
+    if (!firstPoolId) {
+      return;
+    }
+    setComputeForm((prev) => {
+      if (prev.poolId) {
+        return prev;
+      }
+      return { ...prev, poolId: firstPoolId };
+    });
+  }, [computeEligiblePools]);
+
+  async function handleCreateSite() {
+    if (!isAdmin) {
+      setError("Only the admin wallet can register sites");
+      return;
+    }
+
+    try {
+      setError(null);
+      if (!siteForm.name || !siteForm.siteType || !siteForm.approxLocation) {
+        setError("Site name, type and location are required");
+        return;
+      }
+      if (siteForm.areaM2 <= 0) {
+        setError("Site area must be > 0");
+        return;
+      }
+      if (siteForm.targetKw < 0) {
+        setError("Site target kW must be >= 0");
+        return;
+      }
+
+      const tags = siteForm.tagsText
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+      const response = await createSite({
+        walletAddress: wallet,
+        id: siteForm.id || undefined,
+        name: siteForm.name,
+        siteType: siteForm.siteType,
+        areaM2: Number(siteForm.areaM2),
+        targetKw: Number(siteForm.targetKw),
+        approxLocation: siteForm.approxLocation,
+        owner: siteForm.owner || undefined,
+        status: siteForm.status || undefined,
+        tags,
+        mintOnIota: siteForm.mintOnIota,
+        iotaSiteObjectId: siteForm.iotaSiteObjectId || undefined,
+      });
+
+      setStatus(`Site ${response.site.id} registered`);
+      setSiteForm({
+        id: "",
+        name: "",
+        siteType: "Land",
+        areaM2: 1000,
+        targetKw: 100,
+        approxLocation: "",
+        owner: "",
+        status: "seed",
+        tagsText: "",
+        mintOnIota: true,
+        iotaSiteObjectId: "",
+      });
+      await load();
+      setPoolForm((prev) => ({ ...prev, siteId: response.site.id }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Site creation failed");
+    }
+  }
+
+  async function handleSwitchNetwork() {
+    if (!isAdmin) {
+      setError("Only the admin wallet can switch IOTA network");
+      return;
+    }
+
+    try {
+      setError(null);
+      setSwitchingNetwork(true);
+      const result = await setAdminIotaNetwork({
+        walletAddress: wallet,
+        network: selectedNetwork,
+      });
+      selectNetwork(toWalletNetwork(result.activeNetwork));
+      window.dispatchEvent(
+        new CustomEvent("iota-network-changed", { detail: result.activeNetwork })
+      );
+      setStatus(`Active network switched to ${result.activeNetwork}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to switch active network");
+    } finally {
+      setSwitchingNetwork(false);
+    }
+  }
+
   async function handleCreatePool() {
     if (!isAdmin) {
       setError("Only the admin wallet can create pools");
@@ -85,6 +284,15 @@ export function AdminPage() {
 
     try {
       setError(null);
+      if (!poolForm.siteId || !poolForm.title || !poolForm.location) {
+        setError("Site, title and location are required");
+        return;
+      }
+      if (poolForm.fundingDurationDays <= 0) {
+        setError("Funding duration must be at least 1 day");
+        return;
+      }
+
       await createPool({
         walletAddress: wallet,
         ...poolForm,
@@ -106,6 +314,7 @@ export function AdminPage() {
         location: "",
         landValueTokens: 0,
         surplusTokens: 0,
+        fundingDurationDays: 30,
       });
       setDocs([emptyDoc()]);
       await load();
@@ -122,12 +331,25 @@ export function AdminPage() {
 
     try {
       setError(null);
+      if (!acquisitionForm.poolId) {
+        setError("Select a target pool before notarizing acquisition deed");
+        return;
+      }
+      if (!acquisitionForm.name || !acquisitionForm.driveUrl) {
+        setError("Acquisition name and drive URL are required");
+        return;
+      }
       await addAcquisitionDoc({
         walletAddress: wallet,
         ...acquisitionForm,
       });
       setStatus("Acquisition deed notarized");
-      setAcquisitionForm({ poolId: "", name: "", driveUrl: "", docHashSha256: "" });
+      setAcquisitionForm((prev) => ({
+        ...prev,
+        name: "",
+        driveUrl: "",
+        docHashSha256: "",
+      }));
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Acquisition document failed");
@@ -142,6 +364,10 @@ export function AdminPage() {
 
     try {
       setError(null);
+      if (!computeForm.poolId) {
+        setError("Select a target pool before enabling compute offer");
+        return;
+      }
       const parsedDocs = computeForm.docsText
         .split("\n")
         .map((line) => line.trim())
@@ -179,6 +405,53 @@ export function AdminPage() {
     }
   }
 
+  async function handleFinalizeExtraDocs() {
+    if (!isAdmin) {
+      setError("Only the admin wallet can finalize additional documents");
+      return;
+    }
+    if (!finalizeDocsForm.poolId) {
+      setError("Select a pool for batch document finalization");
+      return;
+    }
+
+    const parsedDocs = finalizeDocsForm.docsText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name, docType, driveUrl, docHashSha256] = line.split("|");
+        return {
+          name: (name || "").trim(),
+          docType: (docType || "").trim(),
+          driveUrl: (driveUrl || "").trim(),
+          docHashSha256: (docHashSha256 || "").trim() || undefined,
+        };
+      })
+      .filter((doc) => doc.name && doc.docType && doc.driveUrl);
+
+    if (parsedDocs.length === 0) {
+      setError("Add at least one valid line: NAME|DOC_TYPE|DRIVE_URL|OPTIONAL_SHA256");
+      return;
+    }
+
+    try {
+      setError(null);
+      const result = await finalizePoolDocuments({
+        walletAddress: wallet,
+        poolId: finalizeDocsForm.poolId,
+        documents: parsedDocs,
+      });
+      setStatus(
+        `Finalized ${result.proofs.length} document(s) in tx ${result.notarization.txDigest || "n/a"}`
+      );
+      setFinalizeDocsForm((prev) => ({ ...prev, docsText: "" }));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Batch document finalization failed");
+    }
+  }
+
   return (
     <section className="space-y-5">
       <div className="surface p-6">
@@ -195,8 +468,78 @@ export function AdminPage() {
           <span className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 text-cyan-100">
             Admin wallet: {adminWallet || "not configured"}
           </span>
+          <span className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-1 text-emerald-100">
+            Active network: {meta?.iotaActiveNetwork || "testnet"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Wallet network: {walletNetwork}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            IOTA mode: {meta?.iotaMode || "unknown"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Notarization provider: {meta?.notarizationProvider || "passport"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Escrow mode: {meta?.useIotaEscrow ? "enabled" : "disabled"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Escrow package: {meta?.iotaEscrowPackageId || "not configured"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Notarization signer: {meta?.iotaBackendSigner || "not configured"}
+          </span>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-white/10 bg-slate-900/70 p-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+            Runtime network control
+          </p>
+          <div className="mt-2 flex flex-wrap items-end gap-3">
+            <label className="text-sm text-slate-200">
+              Active network
+              <select
+                className="mt-1 w-44 rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-sm"
+                value={selectedNetwork}
+                onChange={(event) => setSelectedNetwork(event.target.value as IotaNetwork)}
+                disabled={!isAdmin || switchingNetwork}
+              >
+                {(meta?.iotaAvailableNetworks || ["mock", "localnet", "testnet", "mainnet"]).map(
+                  (network) => (
+                    <option key={network} value={network}>
+                      {network}
+                    </option>
+                  )
+                )}
+              </select>
+            </label>
+            <button
+              className="rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={handleSwitchNetwork}
+              disabled={!isAdmin || switchingNetwork}
+            >
+              {switchingNetwork ? "Switching..." : "Switch network"}
+            </button>
+          </div>
+          {meta?.iotaProfiles && meta.iotaProfiles.length > 0 && (
+            <p className="mt-2 text-xs text-slate-400">
+              Profile status:{" "}
+              {meta.iotaProfiles
+                .map(
+                  (item) =>
+                    `${item.network} [pkg:${item.hasPackageId ? "ok" : "missing"}, escrow:${item.hasEscrowPackageId ? "ok" : "missing"}, signer:${item.hasSignerSecretKey ? "ok" : "missing"}]`
+                )
+                .join(" • ")}
+            </p>
+          )}
         </div>
       </div>
+
+      {meta?.notarizationSignerMatchesAdmin === false && (
+        <p className="rounded-xl border border-rose-300/20 bg-rose-400/10 p-3 text-sm text-rose-200">
+          Live notarization signer does not match admin wallet. On testnet, proofs will fail or be inconsistent until signer/admin are aligned.
+        </p>
+      )}
 
       {!isAdmin && (
         <p className="rounded-xl border border-rose-300/20 bg-rose-400/10 p-3 text-sm text-rose-200">
@@ -211,9 +554,142 @@ export function AdminPage() {
         <p className="rounded-xl border border-emerald-300/20 bg-emerald-400/10 p-3 text-sm text-emerald-100">{status}</p>
       )}
 
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
         <article className="surface p-5">
-          <h3 className="text-lg font-semibold text-white">1) Create a New Pool</h3>
+          <h3 className="text-lg font-semibold text-white">1) Register Site</h3>
+          <div className="mt-3 grid gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="text-sm text-slate-200">
+                Site code (optional)
+                <input
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  placeholder="SITE-004"
+                  value={siteForm.id}
+                  onChange={(e) => setSiteForm((prev) => ({ ...prev, id: e.target.value.toUpperCase() }))}
+                />
+              </label>
+              <label className="text-sm text-slate-200">
+                Site name
+                <input
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  placeholder="North Grid Campus 2"
+                  value={siteForm.name}
+                  onChange={(e) => setSiteForm((prev) => ({ ...prev, name: e.target.value }))}
+                />
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="text-sm text-slate-200">
+                Site type
+                <input
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  placeholder="Land / Warehouse / Data Center"
+                  value={siteForm.siteType}
+                  onChange={(e) => setSiteForm((prev) => ({ ...prev, siteType: e.target.value }))}
+                />
+              </label>
+              <label className="text-sm text-slate-200">
+                Approx location
+                <input
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  placeholder="North Italy - Lombardia"
+                  value={siteForm.approxLocation}
+                  onChange={(e) => setSiteForm((prev) => ({ ...prev, approxLocation: e.target.value }))}
+                />
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="text-sm text-slate-200">
+                Area (m2)
+                <input
+                  type="number"
+                  min={1}
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  value={siteForm.areaM2}
+                  onChange={(e) =>
+                    setSiteForm((prev) => ({ ...prev, areaM2: Number(e.target.value) || 0 }))
+                  }
+                />
+              </label>
+              <label className="text-sm text-slate-200">
+                Target power (kW)
+                <input
+                  type="number"
+                  min={0}
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  value={siteForm.targetKw}
+                  onChange={(e) =>
+                    setSiteForm((prev) => ({ ...prev, targetKw: Number(e.target.value) || 0 }))
+                  }
+                />
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="text-sm text-slate-200">
+                Owner wallet (optional)
+                <input
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  placeholder="0x..."
+                  value={siteForm.owner}
+                  onChange={(e) => setSiteForm((prev) => ({ ...prev, owner: e.target.value }))}
+                />
+              </label>
+              <label className="text-sm text-slate-200">
+                Status
+                <input
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  placeholder="seed"
+                  value={siteForm.status}
+                  onChange={(e) => setSiteForm((prev) => ({ ...prev, status: e.target.value }))}
+                />
+              </label>
+            </div>
+
+            <label className="text-sm text-slate-200">
+              Tags (comma-separated)
+              <input
+                className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                placeholder="Cooling-ready, Fiber-near"
+                value={siteForm.tagsText}
+                onChange={(e) => setSiteForm((prev) => ({ ...prev, tagsText: e.target.value }))}
+              />
+            </label>
+
+            <label className="text-sm text-slate-200">
+              Existing on-chain Site object id (optional)
+              <input
+                className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                placeholder="0x..."
+                value={siteForm.iotaSiteObjectId}
+                onChange={(e) =>
+                  setSiteForm((prev) => ({ ...prev, iotaSiteObjectId: e.target.value }))
+                }
+              />
+            </label>
+
+            <label className="inline-flex items-center gap-2 text-sm text-slate-200">
+              <input
+                type="checkbox"
+                checked={siteForm.mintOnIota}
+                onChange={(e) => setSiteForm((prev) => ({ ...prev, mintOnIota: e.target.checked }))}
+              />
+              Mint SiteNFT on IOTA if object id is not provided
+            </label>
+
+            <button
+              className="rounded-lg bg-gradient-to-r from-cyan-300 to-emerald-300 px-4 py-2 text-sm font-semibold text-slate-900"
+              onClick={handleCreateSite}
+            >
+              Register site
+            </button>
+          </div>
+        </article>
+
+        <article className="surface p-5">
+          <h3 className="text-lg font-semibold text-white">2) Create a New Pool</h3>
           <div className="mt-3 grid gap-3">
             <label className="text-sm text-slate-200">
               Site
@@ -279,6 +755,19 @@ export function AdminPage() {
                   placeholder="Hardware, maintenance, setup"
                   value={poolForm.surplusTokens || ""}
                   onChange={(e) => setPoolForm((p) => ({ ...p, surplusTokens: Number(e.target.value) }))}
+                />
+              </label>
+
+              <label className="text-sm text-slate-200">
+                Funding duration (days)
+                <input
+                  type="number"
+                  min={1}
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                  value={poolForm.fundingDurationDays || ""}
+                  onChange={(e) =>
+                    setPoolForm((p) => ({ ...p, fundingDurationDays: Number(e.target.value) || 0 }))
+                  }
                 />
               </label>
             </div>
@@ -354,18 +843,33 @@ export function AdminPage() {
         </article>
 
         <article className="surface p-5">
-          <h3 className="text-lg font-semibold text-white">2) Acquisition Deed and Compute Offer</h3>
+          <h3 className="text-lg font-semibold text-white">3) Acquisition Deed and Compute Offer</h3>
 
           <div className="mt-3 grid gap-3">
             <label className="text-sm text-slate-200">
-              Target pool
+              Target pool (funded/acquired)
               <select
                 className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
                 value={acquisitionForm.poolId}
-                onChange={(e) => setAcquisitionForm((p) => ({ ...p, poolId: e.target.value }))}
+                onChange={(e) => {
+                  const selectedPoolId = e.target.value;
+                  setAcquisitionForm((p) => ({ ...p, poolId: selectedPoolId }));
+                  const selectedPoolCanBeCompute = computeEligiblePools.some(
+                    (pool) => pool.id === selectedPoolId
+                  );
+                  setComputeForm((p) => ({
+                    ...p,
+                    poolId:
+                      selectedPoolCanBeCompute
+                        ? selectedPoolId
+                        : p.poolId || computeEligiblePools[0]?.id || "",
+                  }));
+                }}
               >
-                <option value="">Select pool</option>
-                {pools.map((pool) => (
+                <option value="">
+                  {acquisitionEligiblePools.length > 0 ? "Select pool" : "No funded pool available yet"}
+                </option>
+                {acquisitionEligiblePools.map((pool) => (
                   <option key={pool.id} value={pool.id}>{pool.title} ({pool.status})</option>
                 ))}
               </select>
@@ -393,6 +897,7 @@ export function AdminPage() {
             <button
               className="rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100"
               onClick={handleAcquisitionDoc}
+              disabled={!acquisitionForm.poolId}
             >
               Notarize acquisition deed
             </button>
@@ -400,14 +905,73 @@ export function AdminPage() {
             <hr className="border-white/10" />
 
             <label className="text-sm text-slate-200">
+              Finalize extra docs (single batch tx)
+              <select
+                className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                value={finalizeDocsForm.poolId}
+                onChange={(e) =>
+                  setFinalizeDocsForm((prev) => ({ ...prev, poolId: e.target.value }))
+                }
+              >
+                <option value="">
+                  {finalizeEligiblePools.length > 0 ? "Select pool" : "No eligible pool available"}
+                </option>
+                {finalizeEligiblePools.map((pool) => (
+                  <option key={pool.id} value={pool.id}>
+                    {pool.title} ({pool.status})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="text-sm text-slate-200">
+              Extra documents batch
+              <textarea
+                className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                placeholder="One line: NAME|DOC_TYPE|GOOGLE_DRIVE_URL|OPTIONAL_SHA256"
+                value={finalizeDocsForm.docsText}
+                onChange={(e) =>
+                  setFinalizeDocsForm((prev) => ({ ...prev, docsText: e.target.value }))
+                }
+              />
+            </label>
+            <button
+              className="rounded-lg border border-emerald-300/20 bg-emerald-400/10 px-4 py-2 text-sm font-semibold text-emerald-100"
+              onClick={handleFinalizeExtraDocs}
+              disabled={!finalizeDocsForm.poolId}
+            >
+              Finalize document batch
+            </button>
+
+            <hr className="border-white/10" />
+
+            <label className="text-sm text-slate-200">
+              Compute target pool (acquired/operational)
+              <select
+                className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
+                value={computeForm.poolId}
+                onChange={(e) => setComputeForm((p) => ({ ...p, poolId: e.target.value }))}
+              >
+                <option value="">
+                  {computeEligiblePools.length > 0
+                    ? "Select compute pool"
+                    : "No acquired pool available yet"}
+                </option>
+                {computeEligiblePools.map((pool) => (
+                  <option key={pool.id} value={pool.id}>
+                    {pool.title} ({pool.status})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="text-sm text-slate-200">
               Compute region
               <input
                 className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
                 placeholder="Example: North Italy"
                 value={computeForm.region}
-                onChange={(e) =>
-                  setComputeForm((p) => ({ ...p, region: e.target.value, poolId: acquisitionForm.poolId || p.poolId }))
-                }
+                onChange={(e) => setComputeForm((p) => ({ ...p, region: e.target.value }))}
               />
             </label>
 
@@ -417,9 +981,7 @@ export function AdminPage() {
                 className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2"
                 placeholder="Example: NVIDIA H100"
                 value={computeForm.gpuModel}
-                onChange={(e) =>
-                  setComputeForm((p) => ({ ...p, gpuModel: e.target.value, poolId: acquisitionForm.poolId || p.poolId }))
-                }
+                onChange={(e) => setComputeForm((p) => ({ ...p, gpuModel: e.target.value }))}
               />
             </label>
 
@@ -516,6 +1078,7 @@ export function AdminPage() {
             <button
               className="rounded-lg bg-gradient-to-r from-cyan-300 to-emerald-300 px-4 py-2 text-sm font-semibold text-slate-900"
               onClick={handleComputeOffer}
+              disabled={!computeForm.poolId || computeEligiblePools.length === 0}
             >
               Enable or update compute offer
             </button>

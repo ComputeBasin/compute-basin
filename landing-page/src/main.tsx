@@ -13,16 +13,22 @@ import "./index.css";
 import "@iota/dapp-kit/dist/index.css";
 
 const queryClient = new QueryClient();
+const configuredNetwork = (import.meta.env.VITE_IOTA_NETWORK || "testnet").toLowerCase();
+const defaultNetwork =
+  configuredNetwork === "mainnet" || configuredNetwork === "localnet"
+    ? configuredNetwork
+    : "testnet";
 
 const { networkConfig } = createNetworkConfig({
   testnet: { url: getFullnodeUrl("testnet") },
   mainnet: { url: getFullnodeUrl("mainnet") },
+  localnet: { url: import.meta.env.VITE_IOTA_LOCALNET_URL || "http://127.0.0.1:9000" },
 });
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <IotaClientProvider networks={networkConfig} defaultNetwork="testnet">
+      <IotaClientProvider networks={networkConfig} defaultNetwork={defaultNetwork}>
         <WalletProvider autoConnect>
           <BrowserRouter>
             <App />
