@@ -1,6 +1,7 @@
 import type {
   ComputeOffer,
   Contribution,
+  IotaNetwork,
   Meta,
   Pool,
   PoolSummary,
@@ -16,6 +17,31 @@ import { fetchJson, withWallet } from "./client";
 
 export async function getMeta() {
   return fetchJson<Meta>("/meta");
+}
+
+export async function setAdminIotaNetwork(input: {
+  walletAddress: string;
+  network: IotaNetwork;
+}) {
+  return fetchJson<{
+    activeNetwork: IotaNetwork;
+    runtime: {
+      activeNetwork: IotaNetwork;
+      rpcUrl: string;
+      packageId: string | null;
+      escrowPackageId: string | null;
+      hasSigner: boolean;
+      signerAddress: string | null;
+    };
+  }>(
+    "/admin/iota/network",
+    withWallet(input.walletAddress, {
+      method: "POST",
+      body: JSON.stringify({
+        network: input.network,
+      }),
+    })
+  );
 }
 
 export async function getSites() {
@@ -118,6 +144,7 @@ export async function contributeToPool(input: {
 export async function refundPoolContribution(input: {
   walletAddress: string;
   poolId: string;
+  refundTxDigest?: string;
 }) {
   const poolId = input.poolId?.trim();
   if (!poolId) {
@@ -137,6 +164,7 @@ export async function refundPoolContribution(input: {
       method: "POST",
       body: JSON.stringify({
         walletAddress: input.walletAddress,
+        refundTxDigest: input.refundTxDigest,
       }),
     })
   );

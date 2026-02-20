@@ -2,7 +2,9 @@ import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import {
   ADMIN_WALLET,
-  MOCK_IOTA,
+  USE_IOTA_ESCROW,
+  IOTA_NETWORKS,
+  normalizeIotaNetwork,
   REQUIRE_ONCHAIN_CONTRIBUTION,
   CONTRIBUTION_PRICE_NANOS,
   CONTRIBUTION_RECIPIENT_WALLET,
@@ -23,10 +25,16 @@ import {
 import { sha256Hex } from "../hash.js";
 import {
   createSitePassportOnIota,
+  createPoolEscrowOnIota,
   createBatchNotarizationOnIota,
+  getActiveIotaNetwork,
   getBackendSignerAddress,
-  verifyIotaPaymentTx,
-  sendIotaFromBackend,
+  getIotaRuntimeInfo,
+  isIotaRuntimeMock,
+  setActiveIotaNetwork,
+  withdrawFromEscrowOnIota,
+  verifyEscrowContributionTx,
+  verifyEscrowRefundTx,
 } from "../iotaClient.js";
 
 const router = Router();
@@ -41,6 +49,14 @@ function toLowerAddress(value) {
 function toNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function shouldUseEscrowForPool(pool) {
+  return (
+    REQUIRE_ONCHAIN_CONTRIBUTION &&
+    USE_IOTA_ESCROW &&
+    Boolean(pool?.iotaEscrowObjectId)
+  );
 }
 
 function nextSiteId(store) {
@@ -84,7 +100,7 @@ function requireAdminWallet(req) {
 }
 
 function assertLiveSignerMatchesAdmin() {
-  if (MOCK_IOTA) {
+  if (isIotaRuntimeMock()) {
     return;
   }
   const backendSigner = toLowerAddress(getBackendSignerAddress());
@@ -370,6 +386,38 @@ async function getStore(req) {
   return req.store || (await readStore());
 }
 
+router.post("/admin/iota/network", async (req, res, next) => {
+  try {
+    requireAdminWallet(req);
+    const requestedRaw = String(req.body?.network || "")
+      .trim()
+      .toLowerCase();
+    if (!IOTA_NETWORKS.includes(requestedRaw)) {
+      return res.status(400).json({
+        error: `network must be one of: ${IOTA_NETWORKS.join(", ")}`,
+      });
+    }
+    const requestedNetwork = normalizeIotaNetwork(requestedRaw);
+
+    const store = await getStore(req);
+    store.runtimeConfig = {
+      ...(store.runtimeConfig || {}),
+      activeIotaNetwork: requestedNetwork,
+    };
+
+    setActiveIotaNetwork(requestedNetwork);
+    await writeStore(store);
+
+    const runtime = getIotaRuntimeInfo();
+    res.json({
+      activeNetwork: getActiveIotaNetwork(),
+      runtime,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/sites", async (req, res, next) => {
   try {
     const store = await getStore(req);
@@ -602,7 +650,38 @@ router.post("/admin/pools", async (req, res, next) => {
       tokenSymbol,
       acquisitionProofId: null,
       computeOfferId: null,
+      iotaEscrowObjectId: null,
+      iotaEscrowTxDigest: null,
+      iotaEscrowChainMode: null,
+      iotaEscrowProvider: null,
+      iotaEscrowPackageId: USE_IOTA_ESCROW
+        ? getIotaRuntimeInfo().escrowPackageId || null
+        : null,
     };
+
+    if (REQUIRE_ONCHAIN_CONTRIBUTION && !USE_IOTA_ESCROW) {
+      const error = new Error(
+        "On-chain contribution mode requires USE_IOTA_ESCROW=true. Non-escrow mode is no longer supported."
+      );
+      error.status = 500;
+      throw error;
+    }
+
+    if (REQUIRE_ONCHAIN_CONTRIBUTION) {
+      const hardCapNanoIota = BigInt(hardCapTokens) * CONTRIBUTION_PRICE_NANOS;
+      assertLiveSignerMatchesAdmin();
+      const escrowResult = await createPoolEscrowOnIota({
+        hardCapNanoIota: hardCapNanoIota.toString(),
+        deadlineMs: String(deadlineCandidate),
+        treasuryWallet: CONTRIBUTION_RECIPIENT_WALLET || ADMIN_WALLET,
+      });
+      pool.iotaEscrowObjectId = escrowResult.objectId || null;
+      pool.iotaEscrowTxDigest = escrowResult.txDigest || null;
+      pool.iotaEscrowChainMode = escrowResult.mode || null;
+      pool.iotaEscrowProvider = escrowResult.provider || "pool_escrow";
+      pool.iotaEscrowPackageId =
+        escrowResult.payload?.packageId || getIotaRuntimeInfo().escrowPackageId || null;
+    }
 
     const docsPayload = documents.map((doc) =>
       buildDocPayload(doc, {
@@ -696,24 +775,18 @@ router.post("/pools/:poolId/contribute", async (req, res, next) => {
       });
     }
 
+    if (REQUIRE_ONCHAIN_CONTRIBUTION && !shouldUseEscrowForPool(pool)) {
+      return res.status(409).json({
+        error:
+          "This pool is not mapped to an escrow smart contract object. Recreate or migrate the pool before accepting on-chain contributions.",
+      });
+    }
+
+    const runtimeMock = isIotaRuntimeMock();
     let paymentVerification = null;
     let expectedPaymentAmountNanoIota = null;
     if (REQUIRE_ONCHAIN_CONTRIBUTION) {
-      if (!CONTRIBUTION_RECIPIENT_WALLET) {
-        const error = new Error(
-          "CONTRIBUTION_RECIPIENT_WALLET (or ADMIN_WALLET) must be configured when on-chain contribution is enabled"
-        );
-        error.status = 500;
-        throw error;
-      }
-      if (walletAddress === CONTRIBUTION_RECIPIENT_WALLET) {
-        return res.status(400).json({
-          error:
-            "Contributor wallet cannot be the same as treasury wallet. Use a dedicated treasury wallet or contribute from a different wallet.",
-        });
-      }
-
-      if (normalizedPaymentDigest.length === 0) {
+      if (!runtimeMock && normalizedPaymentDigest.length === 0) {
         return res.status(400).json({
           error: "paymentTxDigest is required when on-chain contribution is enabled",
         });
@@ -723,10 +796,10 @@ router.post("/pools/:poolId/contribute", async (req, res, next) => {
         BigInt(amount) * CONTRIBUTION_PRICE_NANOS
       ).toString();
 
-      paymentVerification = await verifyIotaPaymentTx({
-        txDigest: normalizedPaymentDigest,
+      paymentVerification = await verifyEscrowContributionTx({
+        txDigest: normalizedPaymentDigest || undefined,
         expectedFromWallet: walletAddress,
-        expectedToWallet: CONTRIBUTION_RECIPIENT_WALLET,
+        expectedPoolEscrowObjectId: pool.iotaEscrowObjectId,
         minimumAmountNanoIota: expectedPaymentAmountNanoIota,
       });
     }
@@ -742,17 +815,18 @@ router.post("/pools/:poolId/contribute", async (req, res, next) => {
       poolId: pool.id,
       walletAddress,
       tokenAmount: amount,
-      paymentMode: REQUIRE_ONCHAIN_CONTRIBUTION ? "onchain" : "offchain",
+      paymentMode: REQUIRE_ONCHAIN_CONTRIBUTION ? "onchain_escrow" : "offchain",
       tokenSettlementMode: "locked",
       timestampMs: now,
     };
     if (paymentVerification) {
       contribution.transactionHash = paymentVerification.txDigest;
       contribution.paymentTxDigest = paymentVerification.txDigest;
-      contribution.paymentCoinType = paymentVerification.coinType;
+      contribution.paymentCoinType = paymentVerification.coinType || null;
       contribution.paymentAmountNanoIota = paymentVerification.amountNanoIota;
       contribution.expectedPaymentAmountNanoIota = expectedPaymentAmountNanoIota;
-      contribution.paymentRecipientWallet = paymentVerification.recipient;
+      contribution.paymentRecipientWallet = paymentVerification.recipient || null;
+      contribution.escrowReceiptObjectId = paymentVerification.receiptObjectId || null;
     }
 
     store.contributions.push(contribution);
@@ -777,6 +851,8 @@ router.post("/pools/:poolId/contribute", async (req, res, next) => {
 router.post("/pools/:poolId/refund", async (req, res, next) => {
   try {
     const walletAddress = getRequestWallet(req);
+    const normalizedRefundDigest =
+      typeof req.body?.refundTxDigest === "string" ? req.body.refundTxDigest.trim() : "";
     if (!walletAddress) {
       return res.status(400).json({ error: "walletAddress is required" });
     }
@@ -810,6 +886,59 @@ router.post("/pools/:poolId/refund", async (req, res, next) => {
       });
     }
 
+    let refundTxDigest = null;
+    let refundedNanoIota = null;
+    if (REQUIRE_ONCHAIN_CONTRIBUTION) {
+      if (!shouldUseEscrowForPool(pool)) {
+        return res.status(409).json({
+          error:
+            "This pool has no escrow object; trustless refund cannot be verified. Recreate or migrate the pool to escrow mode.",
+        });
+      }
+      if (isIotaRuntimeMock()) {
+        refundTxDigest = normalizedRefundDigest || `mock_refund_${randomUUID()}`;
+        refundedNanoIota = refundableContributions
+          .reduce(
+            (total, contribution) => total + getContributionPaymentNanos(contribution),
+            0n
+          )
+          .toString();
+      } else {
+        if (!normalizedRefundDigest) {
+          return res.status(400).json({
+            error:
+              "refundTxDigest is required in escrow mode. Execute pool_escrow::refund from wallet and submit tx digest.",
+          });
+        }
+
+        const verifiedRefund = await verifyEscrowRefundTx({
+          txDigest: normalizedRefundDigest,
+          expectedFromWallet: walletAddress,
+          expectedPoolEscrowObjectId: pool.iotaEscrowObjectId,
+        });
+        refundTxDigest = verifiedRefund.txDigest;
+        refundedNanoIota = verifiedRefund.amountNanoIota;
+
+        const matchingContribution = refundableContributions.find(
+          (item) =>
+            item.escrowReceiptObjectId &&
+            verifiedRefund.receiptObjectId &&
+            String(item.escrowReceiptObjectId).toLowerCase() ===
+              String(verifiedRefund.receiptObjectId).toLowerCase()
+        );
+        if (!matchingContribution) {
+          return res.status(404).json({
+            error:
+              "No refundable contribution matches escrow receipt from refund tx digest",
+            escrowReceiptObjectId: verifiedRefund.receiptObjectId,
+          });
+        }
+
+        refundableContributions.length = 0;
+        refundableContributions.push(matchingContribution);
+      }
+    }
+
     const refundableTokenAmount = refundableContributions.reduce(
       (total, item) => total + toNumber(item.tokenAmount),
       0
@@ -830,29 +959,6 @@ router.post("/pools/:poolId/refund", async (req, res, next) => {
     if (remainingToBurn > 0) {
       // Backward-compatibility path for old contributions that were credited directly.
       debitWallet(store, walletAddress, remainingToBurn);
-    }
-
-    let refundTxDigest = null;
-    let refundedNanoIota = null;
-    if (REQUIRE_ONCHAIN_CONTRIBUTION) {
-      const totalRefundNano = refundableContributions.reduce(
-        (total, item) => total + getContributionPaymentNanos(item),
-        0n
-      );
-
-      if (totalRefundNano <= 0n) {
-        return res.status(400).json({
-          error: "Refund amount could not be computed for on-chain contribution mode",
-        });
-      }
-
-      const refundResult = await sendIotaFromBackend({
-        recipientWallet: walletAddress,
-        amountNanoIota: totalRefundNano.toString(),
-        reason: `pool_${pool.id}_failed_refund`,
-      });
-      refundTxDigest = refundResult.txDigest;
-      refundedNanoIota = refundResult.amountNanoIota;
     }
 
     const refundedAtMs = Date.now();
@@ -876,6 +982,55 @@ router.post("/pools/:poolId/refund", async (req, res, next) => {
       refundTxDigest,
       walletBalance: getWalletBalance(store, walletAddress),
       lockedWalletBalance: getWalletLockedBalance(store, walletAddress),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/admin/pools/:poolId/escrow-withdraw", async (req, res, next) => {
+  try {
+    requireAdminWallet(req);
+    const amountRaw =
+      typeof req.body?.amountNanoIota === "string"
+        ? req.body.amountNanoIota.trim()
+        : req.body?.amountNanoIota;
+
+    const store = await getStore(req);
+    const pool = getPoolOrThrow(store, req.params.poolId);
+    const hasEscrow = Boolean(pool.iotaEscrowObjectId);
+    if (!hasEscrow || !USE_IOTA_ESCROW) {
+      return res.status(400).json({
+        error: "Escrow withdraw is available only for pools created in escrow mode",
+      });
+    }
+    if (!["funded", "acquired", "operational", "closed"].includes(pool.status)) {
+      return res.status(400).json({
+        error: "Pool must be funded before escrow withdraw",
+        poolStatus: pool.status,
+      });
+    }
+
+    const amountNanoIota = BigInt(amountRaw || 0);
+    if (amountNanoIota <= 0n) {
+      return res.status(400).json({ error: "amountNanoIota must be > 0" });
+    }
+
+    assertLiveSignerMatchesAdmin();
+    const withdrawResult = await withdrawFromEscrowOnIota({
+      poolEscrowObjectId: pool.iotaEscrowObjectId,
+      amountNanoIota: amountNanoIota.toString(),
+    });
+
+    const alreadyWithdrawn = BigInt(pool.iotaEscrowWithdrawnNanoIota || "0");
+    pool.iotaEscrowWithdrawnNanoIota = (alreadyWithdrawn + amountNanoIota).toString();
+    pool.iotaEscrowLastWithdrawTxDigest = withdrawResult.txDigest;
+    pool.iotaEscrowLastWithdrawAtMs = withdrawResult.timestampMs;
+    await writeStore(store);
+
+    res.status(201).json({
+      pool: buildPoolProgress(pool),
+      escrowWithdraw: withdrawResult,
     });
   } catch (error) {
     next(error);

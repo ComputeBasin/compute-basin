@@ -1,7 +1,12 @@
 import { promises as fs } from "node:fs";
-import { getStorePath } from "./config.js";
+import { getStorePath, IOTA_NETWORK, normalizeIotaNetwork } from "./config.js";
 
 function normalizeStore(raw) {
+  const runtimeConfigRaw =
+    raw.runtimeConfig && typeof raw.runtimeConfig === "object"
+      ? raw.runtimeConfig
+      : {};
+
   const store = {
     // Legacy structures (being phased out)
     sites: Array.isArray(raw.sites) ? raw.sites : [],
@@ -33,6 +38,11 @@ function normalizeStore(raw) {
       ? raw.rbacComputeOffers
       : [],
     rbacRentals: Array.isArray(raw.rbacRentals) ? raw.rbacRentals : [],
+    runtimeConfig: {
+      activeIotaNetwork: normalizeIotaNetwork(
+        runtimeConfigRaw.activeIotaNetwork || IOTA_NETWORK
+      ),
+    },
   };
 
   return store;

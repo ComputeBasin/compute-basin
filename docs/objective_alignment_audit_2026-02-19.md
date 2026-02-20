@@ -1,6 +1,6 @@
 # ComputeBasin Objective Alignment Audit
 
-Date: 2026-02-19
+Date: 2026-02-20 (updated)
 
 ## Scope reviewed
 
@@ -20,6 +20,12 @@ Date: 2026-02-19
 8. Admin site registration flow (`POST /api/admin/sites`) with optional SiteNFT mint.
 9. Batch notarization in one tx for pool-creation docs and compute-offer docs.
 10. Proof hash verification endpoint (`POST /api/proofs/:proofId/verify-hash`) and UI check flow.
+11. On-chain escrow path (enabled + enforced when `REQUIRE_ONCHAIN_CONTRIBUTION=true`):
+- New Move module `pool_escrow.move` with `create_pool`, `contribute`, `withdraw_to_treasury`, `refund`.
+- Backend can create escrow object at pool creation and verify contribution/refund tx via on-chain events.
+12. Admin runtime network switch:
+- `POST /api/admin/iota/network` updates active backend network (`localnet`/`testnet`/`mainnet`) and dashboard labels.
+- Meta now exposes `iotaActiveNetwork`, `iotaAvailableNetworks`, and per-network profile status.
 
 ## 2) What is partially implemented
 
@@ -32,28 +38,26 @@ Date: 2026-02-19
 - Compute offer docs are now notarized in legacy admin flow and attached as proofs.
 - However there is no explicit legal schema enforcement (e.g. mandatory maintenance checklist format).
 
-3. Treasury logic:
-- Treasury wallet is configurable and contribution wallet must differ from treasury wallet.
-- This is still backend policy, not on-chain escrow enforcement.
+3. Escrow state projection:
+- Pool/token states are still persisted in backend store and updated from API flow.
+- There is not yet a continuous reconciliation worker rebuilding state from chain events.
 
 ## 3) Major gaps vs target business model
 
-1. Pool escrow contract per pool is missing.
-- Current payment flow verifies a normal IOTA transfer to treasury.
-- There is no on-chain vault state that enforces:
-  - admin withdraw only when `raised >= hardCap`,
-  - contributor refund rights after deadline if not funded.
+1. Chain-state reconciliation is still missing.
+- Contract exists and backend/frontend support escrow tx verification.
+- Remaining work: rebuild authoritative state from chain events and continuously reconcile backend projections.
 
 2. Per-pool on-chain claim token/collateral is missing.
 - Current claim accounting is in backend store (`walletLockedBalances`) and not an on-chain token object.
 - This means refund entitlement is trusted to backend state, not autonomous on-chain proof.
 
-3. Smart contract scope is narrower than required pool economics.
+3. Smart contract scope is still narrower than full business model.
 - `contracts/sources/passport.move` currently provides:
   - `SiteNFT`,
   - `DocProof`,
   - `ReservationToken`.
-- It does not include fundraising escrow, contribution receipts, refund/withdraw policy logic.
+- `contracts/sources/pool_escrow.move` now adds fundraising escrow + receipts + refund/withdraw constraints, but there is no claim-token economics layer yet.
 
 4. Remote compute provisioning plane is still missing.
 - Renting updates platform state and capacities.
@@ -74,14 +78,13 @@ Date: 2026-02-19
 
 4. Phase D (funding failure refund rights):
 - Implemented in backend workflow.
-- Not yet enforced by autonomous on-chain escrow contract.
+- Enforced by on-chain escrow flow (`pool_escrow::refund`) when on-chain contributions are enabled.
 
 ## 5) What must be built next for full target coherence
 
-1. New Move module `pool_escrow` with:
-- Pool object (`hardCap`, `deadline`, `treasury`, `raised`, `status`).
-- Contribution receipt object per wallet.
-- `contribute`, `finalize_funded`, `refund_after_deadline`, `withdraw_if_funded` entry functions.
+1. Chain reconciliation/indexing service:
+- Build worker to consume `ContributionAccepted`, `PoolFunded`, `RefundClaimed`, `PoolWithdrawn`.
+- Reconstruct `raised`, `funded`, `refunded`, and receipt states from chain as source of truth.
 
 2. Optional per-pool claim token design:
 - Either NFT/receipt object per contribution,
@@ -97,6 +100,7 @@ Date: 2026-02-19
 ## 6) Immediate operational checks for explorer visibility
 
 1. Set `MOCK_IOTA=false`.
-2. Configure `IOTA_PACKAGE_ID` and `IOTA_SIGNER_SECRET_KEY`.
+2. Configure `IOTA_PACKAGE_ID`, `IOTA_ESCROW_PACKAGE_ID` and `IOTA_SIGNER_SECRET_KEY`.
 3. Ensure each site has valid `iotaSiteObjectId` (or mint through `/api/admin/sites`).
-4. Use proof detail page: if `chainMode=live`, tx link should open on explorer.
+4. Set `USE_IOTA_ESCROW=true` and `REQUIRE_ONCHAIN_CONTRIBUTION=true` for trustless contribution/refund flow.
+5. Use proof detail page: if `chainMode=live`, tx link should open on explorer.

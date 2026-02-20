@@ -2,17 +2,16 @@ import { randomUUID } from "node:crypto";
 import { IotaClient, getFullnodeUrl } from "@iota/iota-sdk/client";
 import { Ed25519Keypair } from "@iota/iota-sdk/keypairs/ed25519";
 import { Transaction } from "@iota/iota-sdk/transactions";
-import { IOTA_TYPE_ARG, normalizeIotaAddress } from "@iota/iota-sdk/utils";
+import { normalizeIotaAddress } from "@iota/iota-sdk/utils";
 import {
   NotarizationClient,
   NotarizationClientReadOnly,
 } from "@iota/notarization/node/index.js";
 import {
   MOCK_IOTA,
-  IOTA_FULLNODE_URL,
   IOTA_NETWORK,
-  IOTA_PACKAGE_ID,
-  IOTA_SIGNER_SECRET_KEY,
+  getIotaNetworkProfile,
+  normalizeIotaNetwork,
   IOTA_GAS_BUDGET,
   IOTA_NOTARIZATION_PROVIDER,
 } from "./config.js";
@@ -35,17 +34,24 @@ function hexToBytes(hex) {
   return Uint8Array.from(bytes);
 }
 
-const client = new IotaClient({
-  url: IOTA_FULLNODE_URL || getFullnodeUrl(IOTA_NETWORK),
-});
-
-const signer = IOTA_SIGNER_SECRET_KEY
-  ? Ed25519Keypair.fromSecretKey(IOTA_SIGNER_SECRET_KEY)
-  : null;
-const PAYMENT_VERIFY_MAX_ATTEMPTS = 4;
-const PAYMENT_VERIFY_RETRY_DELAY_MS = 1200;
+const U64_MAX = 18_446_744_073_709_551_615n;
 const OFFICIAL_NOTARIZATION_MODE = IOTA_NOTARIZATION_PROVIDER === "official_locked";
-let officialNotarizationClientPromise = null;
+let activeIotaNetwork = normalizeIotaNetwork(IOTA_NETWORK);
+const clientCache = new Map();
+const signerCache = new Map();
+const officialNotarizationClientPromiseByKey = new Map();
+
+function isMockNetwork(network) {
+  return normalizeIotaNetwork(network) === "mock";
+}
+
+export function isIotaRuntimeMock(network = activeIotaNetwork) {
+  return MOCK_IOTA || isMockNetwork(network);
+}
+
+export function getIotaRuntimeMode(network = activeIotaNetwork) {
+  return isIotaRuntimeMock(network) ? "mock" : "live";
+}
 
 class IotaInteractionSignerAdapter {
   constructor(keypair) {
@@ -70,48 +76,135 @@ class IotaInteractionSignerAdapter {
   }
 }
 
-function assertPassportReady() {
-  if (!IOTA_PACKAGE_ID) {
-    throw new Error("IOTA_PACKAGE_ID is required for passport notarization mode");
+function resolveFullnodeUrl(profile) {
+  const networkForRpc = profile.profileNetwork || profile.network;
+  if (profile.fullnodeUrl) {
+    return profile.fullnodeUrl;
   }
+  if (networkForRpc === "localnet") {
+    return "http://127.0.0.1:9000";
+  }
+  return getFullnodeUrl(networkForRpc === "mainnet" ? "mainnet" : "testnet");
+}
 
-  if (!signer) {
-    throw new Error("IOTA_SIGNER_SECRET_KEY is required for live IOTA operations");
+function getClientForProfile(profile) {
+  const url = resolveFullnodeUrl(profile);
+  const cacheKey = `${profile.network}|${url}`;
+  let client = clientCache.get(cacheKey);
+  if (!client) {
+    client = new IotaClient({ url });
+    clientCache.set(cacheKey, client);
+  }
+  return { client, url };
+}
+
+function getSignerForProfile(profile) {
+  const secretKey = profile.signerSecretKey || "";
+  if (!secretKey) {
+    return null;
+  }
+  if (signerCache.has(secretKey)) {
+    return signerCache.get(secretKey);
+  }
+  try {
+    const signer = Ed25519Keypair.fromSecretKey(secretKey);
+    signerCache.set(secretKey, signer);
+    return signer;
+  } catch (cause) {
+    throw createHttpError(
+      `Invalid IOTA signer secret key configured for network ${profile.network}`,
+      500,
+      cause
+    );
   }
 }
 
-function assertSignerReady() {
-  if (!signer) {
-    throw new Error("IOTA_SIGNER_SECRET_KEY is required for backend-signed IOTA transfers");
+function getRuntime() {
+  const profile = getIotaNetworkProfile(activeIotaNetwork);
+  const { client, url } = getClientForProfile(profile);
+  const signer = getSignerForProfile(profile);
+  const mode = getIotaRuntimeMode(profile.network);
+
+  return {
+    ...profile,
+    rpcUrl: url,
+    mode,
+    client,
+    signer,
+  };
+}
+
+export function setActiveIotaNetwork(network) {
+  activeIotaNetwork = normalizeIotaNetwork(network);
+  return activeIotaNetwork;
+}
+
+export function getActiveIotaNetwork() {
+  return activeIotaNetwork;
+}
+
+export function getIotaRuntimeInfo() {
+  const runtime = getRuntime();
+  return {
+    mode: runtime.mode,
+    activeNetwork: runtime.network,
+    profileNetwork: runtime.profileNetwork,
+    rpcUrl: runtime.rpcUrl,
+    packageId: runtime.packageId || null,
+    escrowPackageId: runtime.escrowPackageId || null,
+    hasSigner: Boolean(runtime.signer),
+    signerAddress: runtime.signer ? runtime.signer.toIotaAddress() : null,
+  };
+}
+
+function assertPassportReady(runtime) {
+  if (!runtime.packageId) {
+    throw new Error(
+      `IOTA package ID is required for passport notarization mode on ${runtime.network}`
+    );
+  }
+
+  if (!runtime.signer) {
+    throw new Error(
+      `IOTA signer secret key is required for live IOTA operations on ${runtime.network}`
+    );
   }
 }
 
-async function sleep(ms) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+function assertSignerReady(runtime) {
+  if (!runtime.signer) {
+    throw new Error(
+      `IOTA signer secret key is required for backend-signed IOTA operations on ${runtime.network}`
+    );
+  }
 }
 
-async function getOfficialNotarizationClient() {
-  assertSignerReady();
-  if (!officialNotarizationClientPromise) {
-    officialNotarizationClientPromise = (async () => {
-      try {
-        const readOnly = await NotarizationClientReadOnly.create(client);
-        const signerAdapter = new IotaInteractionSignerAdapter(signer);
-        return await NotarizationClient.create(readOnly, signerAdapter);
-      } catch (error) {
-        throw createHttpError(
-          `Unable to initialize official IOTA notarization client: ${error.message || String(error)}`,
-          500,
-          error
-        );
-      }
-    })();
+async function getOfficialNotarizationClient(runtime) {
+  assertSignerReady(runtime);
+  const cacheKey = `${runtime.network}|${runtime.rpcUrl}|${runtime.signer.toIotaAddress()}`;
+  if (!officialNotarizationClientPromiseByKey.has(cacheKey)) {
+    officialNotarizationClientPromiseByKey.set(
+      cacheKey,
+      (async () => {
+        try {
+          const readOnly = await NotarizationClientReadOnly.create(runtime.client);
+          const signerAdapter = new IotaInteractionSignerAdapter(runtime.signer);
+          return await NotarizationClient.create(readOnly, signerAdapter);
+        } catch (error) {
+          throw createHttpError(
+            `Unable to initialize official IOTA notarization client: ${error.message || String(error)}`,
+            500,
+            error
+          );
+        }
+      })()
+    );
   }
 
   try {
-    return await officialNotarizationClientPromise;
+    return await officialNotarizationClientPromiseByKey.get(cacheKey);
   } catch (error) {
-    officialNotarizationClientPromise = null;
+    officialNotarizationClientPromiseByKey.delete(cacheKey);
     throw error;
   }
 }
@@ -170,149 +263,48 @@ function toNormalizedAddress(value) {
   }
 }
 
-function extractAddressOwner(owner) {
-  if (!owner || typeof owner !== "object") {
-    return "";
-  }
-
-  if ("AddressOwner" in owner && typeof owner.AddressOwner === "string") {
-    return toNormalizedAddress(owner.AddressOwner);
-  }
-
-  return "";
+function toNormalizedObjectId(value) {
+  return toNormalizedAddress(value);
 }
 
-function toBigIntValue(value) {
-  if (typeof value === "bigint") {
-    return value;
+function getEventByTypeSuffix(events, suffix) {
+  if (!Array.isArray(events)) {
+    return null;
   }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return BigInt(Math.trunc(value));
+  return (
+    events.find(
+      (item) => typeof item?.type === "string" && item.type.endsWith(suffix)
+    ) || null
+  );
+}
+
+function readParsedEventField(parsedJson, keys) {
+  if (!parsedJson || typeof parsedJson !== "object") {
+    return null;
   }
-  if (typeof value === "string" && /^[0-9]+$/.test(value)) {
-    return BigInt(value);
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(parsedJson, key)) {
+      return parsedJson[key];
+    }
   }
   return null;
 }
 
-function getPureInputValue(inputs, index) {
-  const input = Array.isArray(inputs) ? inputs[index] : null;
-  if (!input || input.type !== "pure") {
-    return null;
-  }
-  return input.value;
-}
-
-function resolveAmountFromInputArg(arg, inputs) {
-  if (!arg || typeof arg !== "object" || !("Input" in arg)) {
-    return null;
-  }
-  const pure = getPureInputValue(inputs, arg.Input);
-  return toBigIntValue(pure);
-}
-
-function resolveAddressFromInputArg(arg, inputs) {
-  if (!arg || typeof arg !== "object" || !("Input" in arg)) {
-    return "";
-  }
-  const pure = getPureInputValue(inputs, arg.Input);
-  if (typeof pure !== "string") {
-    return "";
-  }
-  return toNormalizedAddress(pure);
-}
-
-function amountFromResultArg(arg, splitAmountsByTxIndex) {
-  if (!arg || typeof arg !== "object") {
-    return 0n;
-  }
-
-  if ("Result" in arg && Number.isInteger(arg.Result)) {
-    const amounts = splitAmountsByTxIndex.get(arg.Result);
-    if (!Array.isArray(amounts) || amounts.length === 0) {
-      return 0n;
-    }
-    return amounts.reduce((sum, value) => sum + value, 0n);
-  }
-
-  if ("NestedResult" in arg && Array.isArray(arg.NestedResult)) {
-    const [txIndex, nestedIndex] = arg.NestedResult;
-    if (!Number.isInteger(txIndex) || !Number.isInteger(nestedIndex)) {
-      return 0n;
-    }
-    const amounts = splitAmountsByTxIndex.get(txIndex);
-    if (!Array.isArray(amounts)) {
-      return 0n;
-    }
-    return amounts[nestedIndex] || 0n;
-  }
-
-  return 0n;
-}
-
-function extractTransferredAmountFromInputs(response, expectedRecipient) {
-  const tx = response?.transaction?.data?.transaction;
-  if (!tx || tx.kind !== "ProgrammableTransaction") {
-    return 0n;
-  }
-
-  const inputs = Array.isArray(tx.inputs) ? tx.inputs : [];
-  const transactions = Array.isArray(tx.transactions) ? tx.transactions : [];
-  const splitAmountsByTxIndex = new Map();
-
-  // Track split amounts by command index, then resolve TransferObjects command recipients.
-  for (let commandIndex = 0; commandIndex < transactions.length; commandIndex += 1) {
-    const command = transactions[commandIndex];
-    if (!command || typeof command !== "object") {
-      continue;
-    }
-
-    if ("SplitCoins" in command) {
-      const split = command.SplitCoins;
-      if (!Array.isArray(split) || split.length < 2 || !Array.isArray(split[1])) {
-        continue;
-      }
-
-      const amounts = split[1]
-        .map((item) => resolveAmountFromInputArg(item, inputs))
-        .filter((value) => typeof value === "bigint");
-      splitAmountsByTxIndex.set(commandIndex, amounts);
-    }
-  }
-
-  let transferredAmount = 0n;
-  for (const command of transactions) {
-    if (!command || typeof command !== "object" || !("TransferObjects" in command)) {
-      continue;
-    }
-
-    const transfer = command.TransferObjects;
-    if (!Array.isArray(transfer) || transfer.length < 2 || !Array.isArray(transfer[0])) {
-      continue;
-    }
-
-    const recipient = resolveAddressFromInputArg(transfer[1], inputs);
-    if (!recipient || recipient !== expectedRecipient) {
-      continue;
-    }
-
-    for (const objectArg of transfer[0]) {
-      transferredAmount += amountFromResultArg(objectArg, splitAmountsByTxIndex);
-    }
-  }
-
-  return transferredAmount;
-}
-
 export function getBackendSignerAddress() {
-  if (!signer) {
+  let runtime;
+  try {
+    runtime = getRuntime();
+  } catch {
     return null;
   }
-  return signer.toIotaAddress();
+  if (!runtime.signer) {
+    return null;
+  }
+  return runtime.signer.toIotaAddress();
 }
 
 export async function createSitePassportOnIota(payload) {
-  if (MOCK_IOTA) {
+  if (isIotaRuntimeMock()) {
     return {
       mode: "mock",
       provider: "passport",
@@ -323,7 +315,8 @@ export async function createSitePassportOnIota(payload) {
     };
   }
 
-  assertPassportReady();
+  const runtime = getRuntime();
+  assertPassportReady(runtime);
 
   const areaM2 = BigInt(payload.areaM2 || 0);
   const targetKw = BigInt(payload.targetKw || 0);
@@ -337,7 +330,7 @@ export async function createSitePassportOnIota(payload) {
   const tx = new Transaction();
   tx.setGasBudget(IOTA_GAS_BUDGET);
   tx.moveCall({
-    target: `${IOTA_PACKAGE_ID}::passport::mint_site_nft`,
+    target: `${runtime.packageId}::passport::mint_site_nft`,
     arguments: [
       tx.pure.string(payload.siteCode),
       tx.pure.string(payload.siteType),
@@ -347,8 +340,8 @@ export async function createSitePassportOnIota(payload) {
     ],
   });
 
-  const response = await client.signAndExecuteTransaction({
-    signer,
+  const response = await runtime.client.signAndExecuteTransaction({
+    signer: runtime.signer,
     transaction: tx,
     options: {
       showObjectChanges: true,
@@ -371,19 +364,200 @@ export async function createSitePassportOnIota(payload) {
     objectId: siteObjectId,
     txDigest: response.digest,
     timestampMs: Number(response.timestampMs || Date.now()),
-    signedBy: signer.toIotaAddress(),
+    signedBy: runtime.signer.toIotaAddress(),
     payload,
   };
 }
 
+export async function createPoolEscrowOnIota(payload) {
+  const runtime = getRuntime();
+  const normalizedTreasury = toNormalizedAddress(payload?.treasuryWallet || "");
+  const hardCapNanoIota = BigInt(payload?.hardCapNanoIota || 0);
+  const deadlineMs = BigInt(payload?.deadlineMs || 0);
+  const nowMs = BigInt(Date.now());
+
+  if (!normalizedTreasury) {
+    throw createHttpError("Escrow treasury wallet is required", 400);
+  }
+  if (hardCapNanoIota <= 0n || hardCapNanoIota > U64_MAX) {
+    throw createHttpError("hardCapNanoIota must be in range (0, u64]", 400);
+  }
+  if (deadlineMs <= nowMs || deadlineMs > U64_MAX) {
+    throw createHttpError("deadlineMs must be in the future and <= u64", 400);
+  }
+
+  if (runtime.mode === "mock") {
+    return {
+      mode: "mock",
+      provider: "pool_escrow",
+      objectId: fakeDigest(),
+      txDigest: fakeDigest(),
+      timestampMs: Date.now(),
+      signedBy: getBackendSignerAddress(),
+      payload: {
+        hardCapNanoIota: hardCapNanoIota.toString(),
+        deadlineMs: deadlineMs.toString(),
+        treasuryWallet: normalizedTreasury,
+      },
+    };
+  }
+
+  assertSignerReady(runtime);
+  if (!runtime.escrowPackageId) {
+    throw createHttpError(
+      `Escrow package ID is required for on-chain escrow mode on ${runtime.network}`,
+      500
+    );
+  }
+
+  const tx = new Transaction();
+  tx.setGasBudget(IOTA_GAS_BUDGET);
+  tx.moveCall({
+    target: `${runtime.escrowPackageId}::pool_escrow::create_pool`,
+    arguments: [
+      tx.pure.u64(hardCapNanoIota),
+      tx.pure.u64(deadlineMs),
+      tx.pure.address(normalizedTreasury),
+      tx.object("0x6"),
+    ],
+  });
+
+  let response;
+  try {
+    response = await runtime.client.signAndExecuteTransaction({
+      signer: runtime.signer,
+      transaction: tx,
+      options: {
+        showObjectChanges: true,
+        showEffects: true,
+        showEvents: true,
+      },
+    });
+  } catch (error) {
+    throw createHttpError(
+      `Failed to create on-chain escrow pool: ${error.message || String(error)}`,
+      502,
+      error
+    );
+  }
+
+  const objectId = parseCreatedObjectId(response, "PoolEscrow");
+  if (!objectId) {
+    throw createHttpError(
+      "Escrow creation tx succeeded but PoolEscrow object ID was not detected",
+      502,
+      response
+    );
+  }
+
+  return {
+    mode: "live",
+    provider: "pool_escrow",
+    objectId,
+    txDigest: response.digest,
+    timestampMs: Number(response.timestampMs || Date.now()),
+    signedBy: runtime.signer.toIotaAddress(),
+    payload: {
+      hardCapNanoIota: hardCapNanoIota.toString(),
+      deadlineMs: deadlineMs.toString(),
+      treasuryWallet: normalizedTreasury,
+      packageId: runtime.escrowPackageId,
+      network: runtime.network,
+    },
+  };
+}
+
+export async function withdrawFromEscrowOnIota(payload) {
+  const runtime = getRuntime();
+  const poolEscrowObjectId = toNormalizedObjectId(payload?.poolEscrowObjectId || "");
+  const amountNanoIota = BigInt(payload?.amountNanoIota || 0);
+  if (!poolEscrowObjectId) {
+    throw createHttpError("poolEscrowObjectId is required", 400);
+  }
+  if (amountNanoIota <= 0n || amountNanoIota > U64_MAX) {
+    throw createHttpError("amountNanoIota must be in range (0, u64]", 400);
+  }
+
+  if (runtime.mode === "mock") {
+    return {
+      mode: "mock",
+      provider: "pool_escrow",
+      txDigest: fakeDigest(),
+      timestampMs: Date.now(),
+      signedBy: getBackendSignerAddress(),
+      amountNanoIota: amountNanoIota.toString(),
+      poolEscrowObjectId,
+    };
+  }
+
+  assertSignerReady(runtime);
+  if (!runtime.escrowPackageId) {
+    throw createHttpError(
+      `Escrow package ID is required for on-chain escrow mode on ${runtime.network}`,
+      500
+    );
+  }
+
+  const tx = new Transaction();
+  tx.setGasBudget(IOTA_GAS_BUDGET);
+  tx.moveCall({
+    target: `${runtime.escrowPackageId}::pool_escrow::withdraw_to_treasury`,
+    arguments: [
+      tx.object(poolEscrowObjectId),
+      tx.pure.u64(amountNanoIota),
+      tx.object("0x6"),
+    ],
+  });
+
+  let response;
+  try {
+    response = await runtime.client.signAndExecuteTransaction({
+      signer: runtime.signer,
+      transaction: tx,
+      options: {
+        showEffects: true,
+        showEvents: true,
+      },
+    });
+  } catch (error) {
+    throw createHttpError(
+      `Failed to withdraw from on-chain escrow pool: ${error.message || String(error)}`,
+      502,
+      error
+    );
+  }
+
+  if (!response?.digest) {
+    throw createHttpError("Escrow withdraw tx did not return a digest", 502, response);
+  }
+  if (response.effects?.status?.status !== "success") {
+    throw createHttpError(
+      `Escrow withdraw tx failed: ${response.effects?.status?.error || "unknown error"}`,
+      502,
+      response
+    );
+  }
+
+  return {
+    mode: "live",
+    provider: "pool_escrow",
+    txDigest: response.digest,
+    timestampMs: Number(response.timestampMs || Date.now()),
+    signedBy: runtime.signer.toIotaAddress(),
+    amountNanoIota: amountNanoIota.toString(),
+    poolEscrowObjectId,
+  };
+}
+
 export async function createBatchNotarizationOnIota(payload) {
+  const runtime = getRuntime();
   const entries = Array.isArray(payload?.entries) ? payload.entries : [];
   if (entries.length === 0) {
     throw new Error("entries array is required for batch notarization");
   }
   const provider = OFFICIAL_NOTARIZATION_MODE ? "official_locked" : "passport";
 
-  if (MOCK_IOTA) {
+  if (runtime.mode === "mock") {
     const txDigest = fakeDigest();
     const timestampMs = Date.now();
     return {
@@ -408,7 +582,7 @@ export async function createBatchNotarizationOnIota(payload) {
   if (OFFICIAL_NOTARIZATION_MODE) {
     let txOutput;
     try {
-      const notarizationClient = await getOfficialNotarizationClient();
+      const notarizationClient = await getOfficialNotarizationClient(runtime);
       const manifestState = JSON.stringify({
         schema: "computebasin.doc-batch.v1",
         siteId: payload.siteId || null,
@@ -464,7 +638,7 @@ export async function createBatchNotarizationOnIota(payload) {
       provider,
       txDigest,
       timestampMs,
-      signedBy: signer.toIotaAddress(),
+      signedBy: runtime.signer.toIotaAddress(),
       proofs: entries.map((entry, index) => ({
         index,
         objectId: notarizationObjectId,
@@ -478,7 +652,7 @@ export async function createBatchNotarizationOnIota(payload) {
     };
   }
 
-  assertPassportReady();
+  assertPassportReady(runtime);
   if (!payload.siteObjectId) {
     throw new Error(`Missing iotaSiteObjectId for site ${payload.siteId}`);
   }
@@ -488,7 +662,7 @@ export async function createBatchNotarizationOnIota(payload) {
     const timestampMs = entry.timestampMs ?? Date.now();
     const hashBytes = hexToBytes(entry.fileHash);
     tx.moveCall({
-      target: `${IOTA_PACKAGE_ID}::passport::notarize_document`,
+      target: `${runtime.packageId}::passport::notarize_document`,
       arguments: [
         tx.object(payload.siteObjectId),
         tx.pure.string(entry.docType),
@@ -498,8 +672,8 @@ export async function createBatchNotarizationOnIota(payload) {
     });
   }
 
-  const response = await client.signAndExecuteTransaction({
-    signer,
+  const response = await runtime.client.signAndExecuteTransaction({
+    signer: runtime.signer,
     transaction: tx,
     options: {
       showObjectChanges: true,
@@ -522,7 +696,7 @@ export async function createBatchNotarizationOnIota(payload) {
     provider,
     txDigest: response.digest,
     timestampMs,
-    signedBy: signer.toIotaAddress(),
+    signedBy: runtime.signer.toIotaAddress(),
     proofs: entries.map((entry, index) => ({
       index,
       objectId: createdProofIds[index] || null,
@@ -536,287 +710,264 @@ export async function createBatchNotarizationOnIota(payload) {
   };
 }
 
-export async function createNotarizationOnIota(payload) {
-  const result = await createBatchNotarizationOnIota({
-    siteId: payload.siteId,
-    siteObjectId: payload.siteObjectId,
-    entries: [
-      {
-        docType: payload.docType,
-        fileHash: payload.fileHash,
-        fileName: payload.fileName,
-        timestampMs: payload.timestampMs ?? Date.now(),
-      },
-    ],
-  });
-  const firstProof = result.proofs[0];
-  if (!firstProof) {
-    throw createHttpError("Notarization result did not include any proof entry", 502, result);
-  }
-  return {
-    mode: result.mode,
-    provider: result.provider,
-    objectId: firstProof.objectId || null,
-    txDigest: result.txDigest,
-    timestampMs: firstProof.timestampMs || result.timestampMs || Date.now(),
-    signedBy: result.signedBy || null,
-    payload,
-  };
-}
-
-export async function mintReservationOnIota(payload) {
-  if (MOCK_IOTA) {
-    return {
-      mode: "mock",
-      reservationObjectId: fakeDigest(),
-      txDigest: fakeDigest(),
-      timestampMs: Date.now(),
-      payload,
-    };
-  }
-
-  assertPassportReady();
-
-  if (!payload.siteObjectId) {
-    throw new Error(`Missing iotaSiteObjectId for site ${payload.siteId}`);
-  }
-
-  const tx = new Transaction();
-  tx.setGasBudget(IOTA_GAS_BUDGET);
-  tx.moveCall({
-    target: `${IOTA_PACKAGE_ID}::passport::reserve_capacity_for`,
-    arguments: [
-      tx.object(payload.siteObjectId),
-      tx.pure.u64(BigInt(payload.reservedKwUnits)),
-      tx.pure.u64(BigInt(payload.expiresAtMs)),
-      tx.pure.address(payload.walletAddress),
-    ],
-  });
-
-  const response = await client.signAndExecuteTransaction({
-    signer,
-    transaction: tx,
-    options: {
-      showObjectChanges: true,
-      showEffects: true,
-      showEvents: true,
-    },
-  });
-
-  return {
-    mode: "live",
-    reservationObjectId:
-      parseCreatedObjectId(response, "ReservationToken") || fakeDigest(),
-    txDigest: response.digest,
-    timestampMs: Number(response.timestampMs || Date.now()),
-    payload,
-  };
-}
-
-export async function resolveReservationFromDigest(txDigest) {
-  if (MOCK_IOTA) {
-    return {
-      reservationObjectId: null,
-      timestampMs: Date.now(),
-    };
-  }
-
-  const response = await client.getTransactionBlock({
-    digest: txDigest,
-    options: {
-      showObjectChanges: true,
-      showEffects: true,
-      showEvents: true,
-    },
-  });
-
-  return {
-    reservationObjectId: parseCreatedObjectId(response, "ReservationToken"),
-    timestampMs: Number(response.timestampMs || Date.now()),
-  };
-}
-
-export async function verifyIotaPaymentTx({
+export async function verifyEscrowContributionTx({
   txDigest,
   expectedFromWallet,
-  expectedToWallet,
+  expectedPoolEscrowObjectId,
   minimumAmountNanoIota,
 }) {
+  const runtime = getRuntime();
+  const expectedSender = toNormalizedAddress(expectedFromWallet);
+  const expectedPoolId = toNormalizedObjectId(expectedPoolEscrowObjectId);
+  const minAmount = BigInt(minimumAmountNanoIota || 0);
+  if (!expectedPoolId) {
+    throw createHttpError("expectedPoolEscrowObjectId is required", 400);
+  }
+  if (minAmount <= 0n) {
+    throw createHttpError("minimumAmountNanoIota must be > 0", 400);
+  }
+  if (runtime.mode === "mock") {
+    return {
+      txDigest: txDigest || fakeDigest(),
+      sender: expectedSender || "mock_sender",
+      poolEscrowObjectId: expectedPoolId,
+      amountNanoIota: minAmount.toString(),
+      receiptObjectId: fakeDigest(),
+      eventType: "mock::pool_escrow::ContributionAccepted",
+      recipient: null,
+      coinType: "iota::iota::IOTA",
+    };
+  }
+
   if (!txDigest) {
     throw createHttpError("paymentTxDigest is required", 400);
   }
 
-  const expectedSender = toNormalizedAddress(expectedFromWallet);
-  const expectedRecipient = toNormalizedAddress(expectedToWallet);
-  const minAmount = BigInt(minimumAmountNanoIota);
-
-  let lastResponse = null;
-  let lastObservedAmount = 0n;
-  let lastBalanceChangeAmount = 0n;
-  let lastInputTransferAmount = 0n;
-
-  for (let attempt = 1; attempt <= PAYMENT_VERIFY_MAX_ATTEMPTS; attempt += 1) {
-    let response;
-    try {
-      response = await client.getTransactionBlock({
-        digest: txDigest,
-        options: {
-          showInput: true,
-          showEffects: true,
-          showBalanceChanges: true,
-        },
-      });
-    } catch (cause) {
-      if (attempt < PAYMENT_VERIFY_MAX_ATTEMPTS) {
-        await sleep(PAYMENT_VERIFY_RETRY_DELAY_MS);
-        continue;
-      }
-      throw createHttpError(
-        `Unable to fetch payment transaction ${txDigest} from IOTA RPC`,
-        502,
-        cause
-      );
-    }
-
-    if (!response || !response.digest) {
-      if (attempt < PAYMENT_VERIFY_MAX_ATTEMPTS) {
-        await sleep(PAYMENT_VERIFY_RETRY_DELAY_MS);
-        continue;
-      }
-      throw createHttpError(`Transaction ${txDigest} not found`, 400);
-    }
-
-    const txStatus = response.effects?.status?.status;
-    if (txStatus !== "success") {
-      throw createHttpError(
-        `Payment transaction ${txDigest} failed: ${response.effects?.status?.error || "unknown error"}`,
-        400
-      );
-    }
-
-    const sender = toNormalizedAddress(response.transaction?.data?.sender || "");
-    if (!sender) {
-      if (attempt < PAYMENT_VERIFY_MAX_ATTEMPTS) {
-        await sleep(PAYMENT_VERIFY_RETRY_DELAY_MS);
-        continue;
-      }
-      throw createHttpError(
-        `Unable to inspect sender for payment transaction ${txDigest}`,
-        400
-      );
-    }
-
-    if (expectedSender && sender !== expectedSender) {
-      throw createHttpError(
-        `Payment transaction sender ${sender} does not match contributor wallet ${expectedSender}`,
-        400
-      );
-    }
-
-    const receivedAmountNanoIota = (response.balanceChanges || [])
-      .filter((change) => typeof change.coinType === "string")
-      .filter((change) => change.coinType.toLowerCase() === IOTA_TYPE_ARG.toLowerCase())
-      .filter((change) => extractAddressOwner(change.owner) === expectedRecipient)
-      .reduce((total, change) => {
-        const amount = BigInt(change.amount || "0");
-        return amount > 0n ? total + amount : total;
-      }, 0n);
-    const transferredAmountFromInputs = extractTransferredAmountFromInputs(
-      response,
-      expectedRecipient
-    );
-    const observedAmountNanoIota =
-      receivedAmountNanoIota > transferredAmountFromInputs
-        ? receivedAmountNanoIota
-        : transferredAmountFromInputs;
-
-    lastResponse = response;
-    lastObservedAmount = observedAmountNanoIota;
-    lastBalanceChangeAmount = receivedAmountNanoIota;
-    lastInputTransferAmount = transferredAmountFromInputs;
-
-    if (observedAmountNanoIota >= minAmount) {
-      return {
-        txDigest: response.digest,
-        sender,
-        recipient: expectedRecipient,
-        coinType: IOTA_TYPE_ARG,
-        amountNanoIota: observedAmountNanoIota.toString(),
-        balanceChangesAmountNanoIota: receivedAmountNanoIota.toString(),
-        inputTransferAmountNanoIota: transferredAmountFromInputs.toString(),
-      };
-    }
-
-    if (attempt < PAYMENT_VERIFY_MAX_ATTEMPTS) {
-      await sleep(PAYMENT_VERIFY_RETRY_DELAY_MS);
-      continue;
-    }
-  }
-
-  throw createHttpError(
-    `Payment transaction ${txDigest} sent ${lastObservedAmount.toString()} nanoIOTA to ${expectedRecipient}, expected at least ${minAmount.toString()} (balanceChanges=${lastBalanceChangeAmount.toString()}, parsedInputs=${lastInputTransferAmount.toString()})`,
-    400,
-    lastResponse
-  );
-}
-
-export async function sendIotaFromBackend({
-  recipientWallet,
-  amountNanoIota,
-  reason = "pool_refund",
-}) {
-  if (!recipientWallet) {
-    throw createHttpError("recipientWallet is required", 400);
-  }
-
-  const amount = BigInt(amountNanoIota || 0);
-  if (amount <= 0n) {
-    throw createHttpError("amountNanoIota must be > 0", 400);
-  }
-
-  assertSignerReady();
-
   let response;
   try {
-    const tx = new Transaction();
-    tx.setGasBudget(IOTA_GAS_BUDGET);
-    const [coin] = tx.splitCoins(tx.gas, [amount]);
-    tx.transferObjects([coin], recipientWallet);
-
-    response = await client.signAndExecuteTransaction({
-      signer,
-      transaction: tx,
+    response = await runtime.client.getTransactionBlock({
+      digest: txDigest,
       options: {
+        showInput: true,
         showEffects: true,
-        showBalanceChanges: true,
+        showEvents: true,
+        showObjectChanges: true,
       },
     });
   } catch (cause) {
     throw createHttpError(
-      `Failed to send IOTA refund transaction to ${recipientWallet}`,
+      `Unable to fetch escrow contribution transaction ${txDigest} from IOTA RPC`,
       502,
       cause
     );
   }
 
-  if (!response?.digest) {
-    throw createHttpError("IOTA refund transaction did not return a digest", 502);
+  if (!response || !response.digest) {
+    throw createHttpError(`Transaction ${txDigest} not found`, 400);
   }
-
   const txStatus = response.effects?.status?.status;
   if (txStatus !== "success") {
     throw createHttpError(
-      `Refund transaction failed: ${response.effects?.status?.error || "unknown error"}`,
-      502
+      `Escrow contribution transaction ${txDigest} failed: ${response.effects?.status?.error || "unknown error"}`,
+      400
+    );
+  }
+
+  const sender = toNormalizedAddress(response.transaction?.data?.sender || "");
+  if (!sender) {
+    throw createHttpError(
+      `Unable to inspect sender for escrow contribution transaction ${txDigest}`,
+      400
+    );
+  }
+  if (expectedSender && sender !== expectedSender) {
+    throw createHttpError(
+      `Escrow contribution sender ${sender} does not match contributor wallet ${expectedSender}`,
+      400
+    );
+  }
+
+  const contributionEvent = getEventByTypeSuffix(
+    response.events,
+    "::pool_escrow::ContributionAccepted"
+  );
+  if (!contributionEvent) {
+    throw createHttpError(
+      `Escrow contribution tx ${txDigest} does not include ContributionAccepted event`,
+      400
+    );
+  }
+
+  const parsedJson = contributionEvent.parsedJson || null;
+  const eventPoolIdRaw = readParsedEventField(parsedJson, ["pool_id", "poolId"]);
+  const eventContributorRaw = readParsedEventField(parsedJson, [
+    "contributor",
+    "wallet",
+    "wallet_address",
+  ]);
+  const eventAmountRaw = readParsedEventField(parsedJson, [
+    "amount_nanos",
+    "amountNanoIota",
+    "amount",
+  ]);
+  const eventReceiptRaw = readParsedEventField(parsedJson, ["receipt_id", "receiptId"]);
+
+  const eventPoolId = toNormalizedObjectId(String(eventPoolIdRaw || ""));
+  if (!eventPoolId || eventPoolId !== expectedPoolId) {
+    throw createHttpError(
+      `Escrow contribution tx ${txDigest} targets pool ${eventPoolId || "unknown"}, expected ${expectedPoolId}`,
+      400
+    );
+  }
+
+  const eventContributor = toNormalizedAddress(String(eventContributorRaw || ""));
+  if (!eventContributor || eventContributor !== expectedSender) {
+    throw createHttpError(
+      `Escrow contribution tx ${txDigest} contributor ${eventContributor || "unknown"} does not match ${expectedSender}`,
+      400
+    );
+  }
+
+  const amountNanoIota = BigInt(String(eventAmountRaw || "0"));
+  if (amountNanoIota < minAmount) {
+    throw createHttpError(
+      `Escrow contribution tx ${txDigest} accepted ${amountNanoIota.toString()} nanoIOTA, expected at least ${minAmount.toString()}`,
+      400
     );
   }
 
   return {
-    mode: "live",
     txDigest: response.digest,
-    amountNanoIota: amount.toString(),
-    recipientWallet: toNormalizedAddress(recipientWallet),
-    reason,
-    timestampMs: Number(response.timestampMs || Date.now()),
+    sender,
+    poolEscrowObjectId: expectedPoolId,
+    amountNanoIota: amountNanoIota.toString(),
+    receiptObjectId: toNormalizedObjectId(String(eventReceiptRaw || "")) || null,
+    eventType: contributionEvent.type,
+  };
+}
+
+export async function verifyEscrowRefundTx({
+  txDigest,
+  expectedFromWallet,
+  expectedPoolEscrowObjectId,
+}) {
+  const runtime = getRuntime();
+  const expectedSender = toNormalizedAddress(expectedFromWallet);
+  const expectedPoolId = toNormalizedObjectId(expectedPoolEscrowObjectId);
+  if (!expectedPoolId) {
+    throw createHttpError("expectedPoolEscrowObjectId is required", 400);
+  }
+  if (runtime.mode === "mock") {
+    return {
+      txDigest: txDigest || fakeDigest(),
+      sender: expectedSender || "mock_sender",
+      poolEscrowObjectId: expectedPoolId,
+      amountNanoIota: "1",
+      receiptObjectId: fakeDigest(),
+      eventType: "mock::pool_escrow::RefundClaimed",
+    };
+  }
+
+  if (!txDigest) {
+    throw createHttpError("refundTxDigest is required", 400);
+  }
+
+  let response;
+  try {
+    response = await runtime.client.getTransactionBlock({
+      digest: txDigest,
+      options: {
+        showInput: true,
+        showEffects: true,
+        showEvents: true,
+        showObjectChanges: true,
+      },
+    });
+  } catch (cause) {
+    throw createHttpError(
+      `Unable to fetch escrow refund transaction ${txDigest} from IOTA RPC`,
+      502,
+      cause
+    );
+  }
+
+  if (!response || !response.digest) {
+    throw createHttpError(`Transaction ${txDigest} not found`, 400);
+  }
+  const txStatus = response.effects?.status?.status;
+  if (txStatus !== "success") {
+    throw createHttpError(
+      `Escrow refund transaction ${txDigest} failed: ${response.effects?.status?.error || "unknown error"}`,
+      400
+    );
+  }
+
+  const sender = toNormalizedAddress(response.transaction?.data?.sender || "");
+  if (!sender) {
+    throw createHttpError(
+      `Unable to inspect sender for escrow refund transaction ${txDigest}`,
+      400
+    );
+  }
+  if (expectedSender && sender !== expectedSender) {
+    throw createHttpError(
+      `Escrow refund sender ${sender} does not match contributor wallet ${expectedSender}`,
+      400
+    );
+  }
+
+  const refundEvent = getEventByTypeSuffix(response.events, "::pool_escrow::RefundClaimed");
+  if (!refundEvent) {
+    throw createHttpError(
+      `Escrow refund tx ${txDigest} does not include RefundClaimed event`,
+      400
+    );
+  }
+
+  const parsedJson = refundEvent.parsedJson || null;
+  const eventPoolIdRaw = readParsedEventField(parsedJson, ["pool_id", "poolId"]);
+  const eventContributorRaw = readParsedEventField(parsedJson, [
+    "contributor",
+    "wallet",
+    "wallet_address",
+  ]);
+  const eventAmountRaw = readParsedEventField(parsedJson, [
+    "amount_nanos",
+    "amountNanoIota",
+    "amount",
+  ]);
+  const eventReceiptRaw = readParsedEventField(parsedJson, ["receipt_id", "receiptId"]);
+
+  const eventPoolId = toNormalizedObjectId(String(eventPoolIdRaw || ""));
+  if (!eventPoolId || eventPoolId !== expectedPoolId) {
+    throw createHttpError(
+      `Escrow refund tx ${txDigest} targets pool ${eventPoolId || "unknown"}, expected ${expectedPoolId}`,
+      400
+    );
+  }
+
+  const eventContributor = toNormalizedAddress(String(eventContributorRaw || ""));
+  if (!eventContributor || eventContributor !== expectedSender) {
+    throw createHttpError(
+      `Escrow refund tx ${txDigest} contributor ${eventContributor || "unknown"} does not match ${expectedSender}`,
+      400
+    );
+  }
+
+  const amountNanoIota = BigInt(String(eventAmountRaw || "0"));
+  if (amountNanoIota <= 0n) {
+    throw createHttpError(
+      `Escrow refund tx ${txDigest} has invalid refunded amount ${amountNanoIota.toString()}`,
+      400
+    );
+  }
+
+  return {
+    txDigest: response.digest,
+    sender,
+    poolEscrowObjectId: expectedPoolId,
+    amountNanoIota: amountNanoIota.toString(),
+    receiptObjectId: toNormalizedObjectId(String(eventReceiptRaw || "")) || null,
+    eventType: refundEvent.type,
   };
 }

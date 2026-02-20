@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useCurrentAccount } from "@iota/dapp-kit";
+import { useCurrentAccount, useIotaClientContext } from "@iota/dapp-kit";
 import {
   addAcquisitionDoc,
   createPool,
@@ -8,9 +8,10 @@ import {
   getMeta,
   getPools,
   getSites,
+  setAdminIotaNetwork,
   upsertComputeOffer,
 } from "../services/api";
-import type { Meta, PoolSummary, Site } from "../types/domain";
+import type { IotaNetwork, Meta, PoolSummary, Site } from "../types/domain";
 
 function emptyDoc() {
   return {
@@ -21,8 +22,16 @@ function emptyDoc() {
   };
 }
 
+function toWalletNetwork(network: IotaNetwork): "localnet" | "testnet" | "mainnet" {
+  if (network === "localnet" || network === "mainnet") {
+    return network;
+  }
+  return "testnet";
+}
+
 export function AdminPage() {
   const account = useCurrentAccount();
+  const { network: walletNetwork, selectNetwork } = useIotaClientContext();
   const wallet = account?.address?.toLowerCase() || "";
 
   const [adminWallet, setAdminWallet] = useState<string>("");
@@ -31,6 +40,8 @@ export function AdminPage() {
   const [pools, setPools] = useState<PoolSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [selectedNetwork, setSelectedNetwork] = useState<IotaNetwork>("testnet");
+  const [switchingNetwork, setSwitchingNetwork] = useState(false);
 
   const [siteForm, setSiteForm] = useState({
     id: "",
@@ -111,6 +122,9 @@ export function AdminPage() {
     try {
       const [meta, siteData, poolData] = await Promise.all([getMeta(), getSites(), getPools()]);
       setMeta(meta);
+      if (meta.iotaActiveNetwork) {
+        setSelectedNetwork(meta.iotaActiveNetwork);
+      }
       setAdminWallet((meta.adminWallet || "").toLowerCase());
       setSites(siteData);
       setPools(poolData);
@@ -233,6 +247,32 @@ export function AdminPage() {
       setPoolForm((prev) => ({ ...prev, siteId: response.site.id }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Site creation failed");
+    }
+  }
+
+  async function handleSwitchNetwork() {
+    if (!isAdmin) {
+      setError("Only the admin wallet can switch IOTA network");
+      return;
+    }
+
+    try {
+      setError(null);
+      setSwitchingNetwork(true);
+      const result = await setAdminIotaNetwork({
+        walletAddress: wallet,
+        network: selectedNetwork,
+      });
+      selectNetwork(toWalletNetwork(result.activeNetwork));
+      window.dispatchEvent(
+        new CustomEvent("iota-network-changed", { detail: result.activeNetwork })
+      );
+      setStatus(`Active network switched to ${result.activeNetwork}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to switch active network");
+    } finally {
+      setSwitchingNetwork(false);
     }
   }
 
@@ -428,6 +468,12 @@ export function AdminPage() {
           <span className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 text-cyan-100">
             Admin wallet: {adminWallet || "not configured"}
           </span>
+          <span className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-1 text-emerald-100">
+            Active network: {meta?.iotaActiveNetwork || "testnet"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Wallet network: {walletNetwork}
+          </span>
           <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
             IOTA mode: {meta?.iotaMode || "unknown"}
           </span>
@@ -435,8 +481,57 @@ export function AdminPage() {
             Notarization provider: {meta?.notarizationProvider || "passport"}
           </span>
           <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Escrow mode: {meta?.useIotaEscrow ? "enabled" : "disabled"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
+            Escrow package: {meta?.iotaEscrowPackageId || "not configured"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-slate-900 px-3 py-1 text-slate-300">
             Notarization signer: {meta?.iotaBackendSigner || "not configured"}
           </span>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-white/10 bg-slate-900/70 p-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">
+            Runtime network control
+          </p>
+          <div className="mt-2 flex flex-wrap items-end gap-3">
+            <label className="text-sm text-slate-200">
+              Active network
+              <select
+                className="mt-1 w-44 rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-sm"
+                value={selectedNetwork}
+                onChange={(event) => setSelectedNetwork(event.target.value as IotaNetwork)}
+                disabled={!isAdmin || switchingNetwork}
+              >
+                {(meta?.iotaAvailableNetworks || ["mock", "localnet", "testnet", "mainnet"]).map(
+                  (network) => (
+                    <option key={network} value={network}>
+                      {network}
+                    </option>
+                  )
+                )}
+              </select>
+            </label>
+            <button
+              className="rounded-lg border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={handleSwitchNetwork}
+              disabled={!isAdmin || switchingNetwork}
+            >
+              {switchingNetwork ? "Switching..." : "Switch network"}
+            </button>
+          </div>
+          {meta?.iotaProfiles && meta.iotaProfiles.length > 0 && (
+            <p className="mt-2 text-xs text-slate-400">
+              Profile status:{" "}
+              {meta.iotaProfiles
+                .map(
+                  (item) =>
+                    `${item.network} [pkg:${item.hasPackageId ? "ok" : "missing"}, escrow:${item.hasEscrowPackageId ? "ok" : "missing"}, signer:${item.hasSignerSecretKey ? "ok" : "missing"}]`
+                )
+                .join(" • ")}
+            </p>
+          )}
         </div>
       </div>
 

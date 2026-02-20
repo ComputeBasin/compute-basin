@@ -2,29 +2,7 @@
 # This file should be checked in.
 
 [move]
-version = 3
-manifest_digest = "0EA31AE8210749FC9BC4BAAEF78BCF482125DB2D3FD5F9F10D91E07F64BE09E4"
-deps_digest = "F8BBB0CCB2491CA29A3DF03D6F92277A4F3574266507ACD77214D37ECA3F3082"
-dependencies = [
-  { id = "Iota", name = "Iota" },
-]
-
-[[move.package]]
-id = "Iota"
-source = { git = "https://github.com/iotaledger/iota.git", rev = "testnet", subdir = "crates/iota-framework/packages/iota-framework" }
-
-dependencies = [
-  { id = "MoveStdlib", name = "MoveStdlib" },
-]
-
-[[move.package]]
-id = "MoveStdlib"
-source = { git = "https://github.com/iotaledger/iota.git", rev = "testnet", subdir = "crates/iota-framework/packages/move-stdlib" }
-
-[move.toolchain-version]
-compiler-version = "1.2.2-rc"
-edition = "2024.beta"
-flavor = "iota"
+version = 4
 
 [pinned.testnet.MoveStdlib]
 source = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/move-stdlib", rev = "072a2111619715c3348d1b83c0526c3bcfa5cdd1" }
@@ -43,11 +21,3 @@ source = { root = true }
 use_environment = "testnet"
 manifest_digest = "0532D72C4F42A4472D331C54E2F8FB1595A305815D58568D26C6F8A4AC9BBFCE"
 deps = { Sui = "Sui" }
-
-[env]
-
-[env.testnet]
-chain-id = "2304aa97"
-original-published-id = "0x55cb3dff5e7898c3cfca5ec28476d2217c06030e4266cb857de4785d825a85a3"
-latest-published-id = "0x55cb3dff5e7898c3cfca5ec28476d2217c06030e4266cb857de4785d825a85a3"
-published-version = "1"

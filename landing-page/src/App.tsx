@@ -1,18 +1,35 @@
 import { Navigate, Route, Routes, Link } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { ConnectButton, useCurrentAccount } from "@iota/dapp-kit";
+import { ConnectButton, useCurrentAccount, useIotaClientContext } from "@iota/dapp-kit";
 import { HomePage } from "./pages/HomePage";
 import { AdminPage } from "./pages/AdminPage";
 import { ProofDetailsPage } from "./pages/ProofDetailsPage";
 import { getMeta } from "./services/api";
+import type { IotaNetwork } from "./types/domain";
 
 function trimAddress(address: string) {
   return `${address.slice(0, 6)}...${address.slice(-6)}`;
 }
 
+function toWalletNetwork(network: IotaNetwork): "localnet" | "testnet" | "mainnet" {
+  if (network === "localnet" || network === "mainnet") {
+    return network;
+  }
+  return "testnet";
+}
+
+function formatNetworkLabel(network: IotaNetwork) {
+  if (network === "mainnet") return "Mainnet";
+  if (network === "localnet") return "Localnet";
+  if (network === "mock") return "Mock (simulated tx)";
+  return "Testnet";
+}
+
 export default function App() {
   const account = useCurrentAccount();
+  const { network: walletNetwork, selectNetwork } = useIotaClientContext();
   const [adminWallet, setAdminWallet] = useState("");
+  const [activeNetwork, setActiveNetwork] = useState<IotaNetwork>("testnet");
   const wallet = account?.address?.toLowerCase() || "";
   const isAdmin = Boolean(wallet && adminWallet && wallet === adminWallet);
 
@@ -22,6 +39,9 @@ export default function App() {
       .then((meta) => {
         if (!mounted) return;
         setAdminWallet((meta.adminWallet || "").toLowerCase());
+        if (meta.iotaActiveNetwork) {
+          setActiveNetwork(meta.iotaActiveNetwork);
+        }
       })
       .catch(() => {
         if (!mounted) return;
@@ -30,6 +50,25 @@ export default function App() {
 
     return () => {
       mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const walletTarget = toWalletNetwork(activeNetwork);
+    if (walletNetwork !== walletTarget) {
+      selectNetwork(walletTarget);
+    }
+  }, [activeNetwork, walletNetwork, selectNetwork]);
+
+  useEffect(() => {
+    function handleNetworkChanged(event: Event) {
+      const customEvent = event as CustomEvent<IotaNetwork>;
+      if (!customEvent.detail) return;
+      setActiveNetwork(customEvent.detail);
+    }
+    window.addEventListener("iota-network-changed", handleNetworkChanged);
+    return () => {
+      window.removeEventListener("iota-network-changed", handleNetworkChanged);
     };
   }, []);
 
@@ -53,6 +92,9 @@ export default function App() {
                   Admin
                 </Link>
               )}
+              <span className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-3 py-1 text-emerald-100">
+                {formatNetworkLabel(activeNetwork)}
+              </span>
             </div>
           </div>
 

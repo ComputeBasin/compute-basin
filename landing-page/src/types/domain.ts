@@ -193,6 +193,11 @@ export type PoolSummary = {
   tokenSymbol: string;
   createdAtMs: number;
   acquisitionProofId?: string;
+  iotaEscrowObjectId?: string | null;
+  iotaEscrowTxDigest?: string | null;
+  iotaEscrowChainMode?: "mock" | "live" | null;
+  iotaEscrowProvider?: string | null;
+  iotaEscrowPackageId?: string | null;
 };
 
 // ============================================================================
@@ -206,7 +211,7 @@ export type Contribution = {
   walletAddress: string;
   tokenAmount: number;
   valueEur?: number;
-  paymentMode?: "onchain" | "offchain";
+  paymentMode?: "onchain" | "onchain_escrow" | "offchain";
   tokenSettlementMode?: "locked" | "liquid";
   tokensReleasedAtMs?: number;
   transactionHash?: string;
@@ -215,6 +220,7 @@ export type Contribution = {
   expectedPaymentAmountNanoIota?: string;
   paymentRecipientWallet?: string;
   paymentCoinType?: string;
+  escrowReceiptObjectId?: string | null;
   refundedAtMs?: number;
   refundReason?: string;
   refundTxDigest?: string;
@@ -347,11 +353,26 @@ export type Proof = {
 // METADATA & SYSTEM TYPES
 // ============================================================================
 
+export type IotaNetwork = "mock" | "localnet" | "testnet" | "mainnet";
+
 export type Meta = {
   adminWallet: string | null;
   iotaMode?: "mock" | "live";
+  iotaActiveNetwork?: IotaNetwork;
+  iotaAvailableNetworks?: IotaNetwork[];
+  iotaRpcUrl?: string | null;
+  iotaPackageId?: string | null;
+  iotaProfiles?: Array<{
+    network: IotaNetwork;
+    hasFullnodeUrl: boolean;
+    hasPackageId: boolean;
+    hasEscrowPackageId: boolean;
+    hasSignerSecretKey: boolean;
+  }>;
   iotaBackendSigner?: string | null;
   notarizationProvider?: string;
+  useIotaEscrow?: boolean;
+  iotaEscrowPackageId?: string | null;
   notarizationSignerMatchesAdmin?: boolean | null;
   onChainContributionRequired?: boolean;
   contributionPriceNanoIota?: string;

@@ -34,12 +34,15 @@ Optional backend env for notarization provider:
 
 - `IOTA_NOTARIZATION_PROVIDER=passport` (default, uses local `passport.move`)
 - `IOTA_NOTARIZATION_PROVIDER=official_locked` (uses official `@iota/notarization` locked method)
+- `USE_IOTA_ESCROW=true` enables trustless pool escrow module (`pool_escrow.move`) for contribution/refund flows
+- when `REQUIRE_ONCHAIN_CONTRIBUTION=true`, escrow mode is mandatory (non-escrow fallback removed)
+- admin can switch active IOTA runtime network (`localnet` / `testnet` / `mainnet`) from dashboard (`POST /api/admin/iota/network`)
 
 ## CI/CD
 
 GitHub Actions workflows:
 
-- `CI` (`.github/workflows/ci.yml`): runs backend tests and frontend build on push/PR.
+- `CI` (`.github/workflows/ci.yml`): runs backend tests and frontend build on push/PR (Node `20.19.0`).
 - `CD` (`.github/workflows/cd.yml`): on `main` (or manual run), builds and uploads:
   - backend package artifact
   - frontend `dist` artifact

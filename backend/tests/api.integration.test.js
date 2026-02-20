@@ -13,6 +13,10 @@ const INVESTOR_WALLET =
 
 process.env.ADMIN_WALLET = ADMIN_WALLET;
 process.env.MOCK_IOTA = "true";
+process.env.USE_IOTA_ESCROW = "false";
+process.env.IOTA_ESCROW_PACKAGE_ID = "";
+process.env.REQUIRE_ONCHAIN_CONTRIBUTION = "false";
+process.env.IOTA_NETWORK = "testnet";
 
 function makeStore() {
   return {
@@ -139,8 +143,17 @@ test("health, meta and auth roles expose expected contract", async () => {
     assert.equal(meta.status, 200);
     assert.equal(meta.payload.adminWallet, ADMIN_WALLET);
     assert.equal(meta.payload.iotaMode, "mock");
+    assert.equal(meta.payload.iotaActiveNetwork, "testnet");
+    assert.deepEqual(meta.payload.iotaAvailableNetworks, [
+      "mock",
+      "localnet",
+      "testnet",
+      "mainnet",
+    ]);
     assert.equal(meta.payload.iotaBackendSigner, null);
     assert.equal(meta.payload.notarizationProvider, "passport");
+    assert.equal(meta.payload.useIotaEscrow, false);
+    assert.equal(meta.payload.iotaEscrowPackageId, null);
     assert.equal(meta.payload.notarizationSignerMatchesAdmin, null);
     assert.equal(meta.payload.onChainContributionRequired, false);
     assert.equal(meta.payload.contributionPriceNanoIota, "1000000");
@@ -155,6 +168,45 @@ test("health, meta and auth roles expose expected contract", async () => {
     assert.equal(roles.payload.walletAddress, SRL_WALLET);
     assert.deepEqual(roles.payload.roles, ["srl"]);
     assert.equal(roles.payload.kycStatus, "verified");
+  } finally {
+    await server.close();
+  }
+});
+
+test("Legacy admin can switch active IOTA network from dashboard endpoint", async () => {
+  const server = await startServer(makeStore());
+  try {
+    const forbidden = await request(server.baseUrl, "/api/admin/iota/network", {
+      method: "POST",
+      wallet: INVESTOR_WALLET,
+      body: { network: "localnet" },
+    });
+    assert.equal(forbidden.status, 403);
+
+    const switched = await request(server.baseUrl, "/api/admin/iota/network", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: { network: "localnet" },
+    });
+    assert.equal(switched.status, 200);
+    assert.equal(switched.payload.activeNetwork, "localnet");
+
+    const meta = await request(server.baseUrl, "/api/meta");
+    assert.equal(meta.status, 200);
+    assert.equal(meta.payload.iotaActiveNetwork, "localnet");
+
+    const switchedMock = await request(server.baseUrl, "/api/admin/iota/network", {
+      method: "POST",
+      wallet: ADMIN_WALLET,
+      body: { network: "mock" },
+    });
+    assert.equal(switchedMock.status, 200);
+    assert.equal(switchedMock.payload.activeNetwork, "mock");
+
+    const metaMock = await request(server.baseUrl, "/api/meta");
+    assert.equal(metaMock.status, 200);
+    assert.equal(metaMock.payload.iotaActiveNetwork, "mock");
+    assert.equal(metaMock.payload.iotaMode, "mock");
   } finally {
     await server.close();
   }

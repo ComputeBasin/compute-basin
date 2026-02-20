@@ -59,6 +59,22 @@ export function HomePage() {
       .slice(0, 6);
   }, [walletSummary?.contributions]);
   const onChainContributionRequired = Boolean(meta?.onChainContributionRequired);
+  const escrowEnabledGlobally = Boolean(meta?.useIotaEscrow);
+  const activeNetwork = meta?.iotaActiveNetwork || "testnet";
+  const runtimeMockMode = meta?.iotaMode === "mock" || activeNetwork === "mock";
+  const networkLabel =
+    activeNetwork === "mainnet"
+      ? "Mainnet"
+      : activeNetwork === "localnet"
+        ? "Localnet"
+        : activeNetwork === "mock"
+          ? "Mock (simulated tx)"
+        : "Testnet";
+
+  function isEscrowEnabledForPool(pool: PoolSummary | null | undefined) {
+    const packageId = pool?.iotaEscrowPackageId || meta?.iotaEscrowPackageId;
+    return Boolean(escrowEnabledGlobally && pool?.iotaEscrowObjectId && packageId);
+  }
 
   async function load() {
     setLoading(true);
@@ -111,36 +127,53 @@ export function HomePage() {
       return;
     }
     const amount = Number(parsedAmount);
+    const targetPool = pools.find((item) => item.id === poolId) || null;
+    const escrowEnabledForPool = isEscrowEnabledForPool(targetPool);
 
     let paymentTxDigest: string | undefined;
     try {
       setError(null);
       if (onChainContributionRequired) {
-        const treasuryWallet = (meta?.contributionRecipientWallet || "").toLowerCase();
         const rawPriceNanoIota = meta?.contributionPriceNanoIota || "0";
         if (!/^[0-9]+$/.test(rawPriceNanoIota)) {
           throw new Error("Backend contribution price configuration is invalid");
         }
         const priceNanoIota = BigInt(rawPriceNanoIota);
-        if (!treasuryWallet || priceNanoIota <= 0n) {
-          throw new Error("Backend contribution payment policy is not configured");
-        }
-        if (wallet === treasuryWallet) {
+        if (!escrowEnabledGlobally) {
           throw new Error(
-            "Connected wallet equals treasury wallet. Switch contributor wallet or configure a dedicated treasury wallet on backend."
+            "On-chain contribution requires escrow mode, but backend metadata says escrow is disabled."
           );
         }
+        if (priceNanoIota <= 0n) {
+          throw new Error("Backend contribution payment policy is not configured");
+        }
+        if (!escrowEnabledForPool) {
+          throw new Error(
+            "This pool is not escrow-enabled. Ask admin to recreate/migrate it before contributing."
+          );
+        }
+        if (!runtimeMockMode) {
+          const totalPaymentNanoIota = parsedAmount * priceNanoIota;
+          const tx = new Transaction();
+          const [paymentCoin] = tx.splitCoins(tx.gas, [totalPaymentNanoIota]);
+          const escrowPackageId = targetPool?.iotaEscrowPackageId || meta?.iotaEscrowPackageId || "";
+          const escrowObjectId = targetPool?.iotaEscrowObjectId || "";
+          if (!escrowPackageId || !escrowObjectId) {
+            throw new Error(
+              "Escrow mode is enabled but pool escrow object/package is missing. Ask admin to recreate pool with escrow."
+            );
+          }
+          tx.moveCall({
+            target: `${escrowPackageId}::pool_escrow::contribute`,
+            arguments: [tx.object(escrowObjectId), paymentCoin, tx.object("0x6")],
+          });
 
-        const totalPaymentNanoIota = parsedAmount * priceNanoIota;
-        const tx = new Transaction();
-        const [paymentCoin] = tx.splitCoins(tx.gas, [totalPaymentNanoIota]);
-        tx.transferObjects([paymentCoin], treasuryWallet);
-
-        const txResult = await signAndExecuteTransaction({
-          transaction: tx,
-          waitForTransaction: true,
-        });
-        paymentTxDigest = txResult.digest;
+          const txResult = await signAndExecuteTransaction({
+            transaction: tx,
+            waitForTransaction: true,
+          });
+          paymentTxDigest = txResult.digest;
+        }
       }
 
       await contributeToPool({
@@ -197,9 +230,57 @@ export function HomePage() {
 
     try {
       setError(null);
+      let refundTxDigest: string | undefined;
+      const targetPool = pools.find((item) => item.id === poolId) || null;
+      if (onChainContributionRequired && !isEscrowEnabledForPool(targetPool)) {
+        throw new Error(
+          "Pool refund must be executed from escrow, but this pool has no escrow metadata."
+        );
+      }
+      if (onChainContributionRequired && isEscrowEnabledForPool(targetPool)) {
+        if (!runtimeMockMode) {
+          const escrowPackageId =
+            targetPool?.iotaEscrowPackageId || meta?.iotaEscrowPackageId || "";
+          const escrowObjectId = targetPool?.iotaEscrowObjectId || "";
+          const refundableContribution = (walletSummary?.contributions || [])
+            .filter(
+              (item) =>
+                item.poolId === poolId &&
+                !item.refundedAtMs &&
+                !item.tokensReleasedAtMs &&
+                Boolean(item.escrowReceiptObjectId)
+            )
+            .sort((a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0))[0];
+          if (!refundableContribution?.escrowReceiptObjectId) {
+            throw new Error(
+              "No escrow receipt found for this pool on current wallet. Cannot submit on-chain refund."
+            );
+          }
+          if (!escrowPackageId || !escrowObjectId) {
+            throw new Error("Escrow package/object is missing on backend metadata");
+          }
+
+          const tx = new Transaction();
+          tx.moveCall({
+            target: `${escrowPackageId}::pool_escrow::refund`,
+            arguments: [
+              tx.object(escrowObjectId),
+              tx.object(refundableContribution.escrowReceiptObjectId),
+              tx.object("0x6"),
+            ],
+          });
+          const txResult = await signAndExecuteTransaction({
+            transaction: tx,
+            waitForTransaction: true,
+          });
+          refundTxDigest = txResult.digest;
+        }
+      }
+
       await refundPoolContribution({
         walletAddress: wallet,
         poolId,
+        refundTxDigest,
       });
       await load();
     } catch (err) {
@@ -219,10 +300,10 @@ export function HomePage() {
 
   function txExplorerUrl(txDigest?: string | null) {
     if (!txDigest) return null;
-    const network =
-      (import.meta.env.VITE_IOTA_NETWORK || "testnet").toLowerCase() === "mainnet"
-        ? "mainnet"
-        : "testnet";
+    if (runtimeMockMode || activeNetwork === "localnet") {
+      return null;
+    }
+    const network = activeNetwork === "mainnet" ? "mainnet" : "testnet";
     return `https://explorer.iota.org/transaction/${txDigest}?network=${network}`;
   }
 
@@ -277,26 +358,40 @@ export function HomePage() {
           A single participant wallet flow: buy tokens by joining pools, then spend the same tokens
           to rent compute from active sites.
         </p>
+        <p className="mt-2 inline-flex rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 text-xs text-slate-200">
+          Network: {networkLabel}
+        </p>
         {onChainContributionRequired ? (
           <p className="mt-2 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-xs text-emerald-100">
-            On-chain mode ({meta?.iotaMode || "unknown"}): each contribution triggers an IOTA transfer to{" "}
-            {meta?.contributionRecipientWallet || "treasury wallet"} at{" "}
-            {meta?.contributionPriceNanoIota || "0"} nanoIOTA per token. Tokens stay locked until
-            pool is funded; if deadline fails, refund is enabled.
+            {runtimeMockMode
+              ? `Mock mode (${meta?.iotaMode || "unknown"}, ${networkLabel}): contributions simulate pool escrow deposits at `
+              : `On-chain mode (${meta?.iotaMode || "unknown"}, ${networkLabel}): each contribution triggers a pool escrow smart-contract deposit at `}
+            {meta?.contributionPriceNanoIota || "0"} nanoIOTA per token.
+            Tokens stay locked
+            until pool is funded; if deadline fails, refund is enabled.
             {meta?.tokensPerIota && meta?.iotaPerToken && (
               <> Exchange rate: 1 IOTA = {meta.tokensPerIota} SFC ({meta.iotaPerToken} IOTA/SFC).</>
+            )}
+            {meta?.useIotaEscrow && meta?.iotaEscrowPackageId && (
+              <> Escrow package: {meta.iotaEscrowPackageId}.</>
             )}
             {meta?.notarizationProvider && (
               <> Notarization provider: {meta.notarizationProvider}.</>
             )}
-            {meta?.iotaMode === "mock" && (
-              <> Notarization digests are synthetic in mock mode and not visible on explorer.</>
+            {runtimeMockMode && (
+              <> Notarization and escrow digests are synthetic in mock mode and not visible on explorer.</>
             )}
           </p>
         ) : (
           <p className="mt-2 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
             Demo mode: pool contributions update platform balances off-chain. Your wallet IOTA
             balance is not debited yet.
+          </p>
+        )}
+        {onChainContributionRequired && !escrowEnabledGlobally && (
+          <p className="mt-2 rounded-lg border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-200">
+            On-chain mode requires escrow metadata (`useIotaEscrow=true`) from backend.
+            Contributions are disabled until configuration is fixed for {networkLabel}.
           </p>
         )}
 
@@ -397,6 +492,11 @@ export function HomePage() {
                       ) : (
                         shortDigest(item.paymentTxDigest)
                       )}
+                    </p>
+                  )}
+                  {item.escrowReceiptObjectId && (
+                    <p className="mt-1 text-slate-300">
+                      Escrow receipt: {shortDigest(item.escrowReceiptObjectId)}
                     </p>
                   )}
                   {item.refundTxDigest && (
@@ -522,25 +622,37 @@ export function HomePage() {
                 <button
                   className="rounded-lg bg-gradient-to-r from-cyan-300 to-emerald-300 px-4 py-2 text-sm font-semibold text-slate-900"
                   onClick={() => handleContribute(pool.id)}
-                  disabled={pool.status !== "open"}
+                  disabled={
+                    pool.status !== "open" ||
+                    (onChainContributionRequired && !isEscrowEnabledForPool(pool))
+                  }
                 >
                   {onChainContributionRequired
-                    ? "Contribute (on-chain IOTA)"
+                    ? runtimeMockMode
+                      ? "Contribute (mock escrow)"
+                      : "Contribute (on-chain escrow)"
                     : "Contribute (demo ledger)"}
                 </button>
                 {pool.status === "failed" && (
                   <button
                     className="rounded-lg border border-amber-300/30 bg-amber-300/10 px-4 py-2 text-sm font-semibold text-amber-100"
                     onClick={() => handleRefund(pool.id)}
+                    disabled={onChainContributionRequired && !isEscrowEnabledForPool(pool)}
                   >
-                    Withdraw / Refund
+                    {onChainContributionRequired
+                      ? isEscrowEnabledForPool(pool)
+                        ? runtimeMockMode
+                          ? "Claim refund (mock escrow)"
+                          : "Claim refund (on-chain)"
+                        : "Refund unavailable (migrate pool)"
+                      : "Withdraw / Refund"}
                   </button>
                 )}
               </div>
               {onChainContributionRequired && contributionPreview && (
                 <p className="mt-2 text-xs text-emerald-200">
-                  Wallet signature amount: {contributionPreview.totalIota} IOTA (
-                  {contributionPreview.totalNano} nanoIOTA)
+                  {runtimeMockMode ? "Escrow equivalent (simulated): " : "Wallet signature amount: "}
+                  {contributionPreview.totalIota} IOTA ({contributionPreview.totalNano} nanoIOTA)
                 </p>
               )}
               </article>
